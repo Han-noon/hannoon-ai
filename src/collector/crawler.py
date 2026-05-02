@@ -1,5 +1,6 @@
 import time
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
 
 import requests
 
@@ -17,8 +18,8 @@ def fetch_url_text(url: str, offline: bool) -> str | None:
     """
     parsed = urlparse(url)
     if parsed.scheme == "file":
-        # 오프라인 테스트에서는 RSS 항목의 링크가 로컬 HTML 파일을 가리킬 수 있다.
-        local_path = parsed.path.lstrip("/")
+        # file:// URI는 OS별 로컬 경로 규칙에 맞게 변환해야 한다.
+        local_path = url2pathname(unquote(parsed.path))
         with open(local_path, "r", encoding="utf-8") as handle:
             html = handle.read()
         return extract_article_text(html)

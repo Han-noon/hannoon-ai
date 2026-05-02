@@ -1,9 +1,36 @@
+import json
 from urllib.parse import urlparse
 
 import feedparser
 
 from .storage import enqueue_article_job, normalize_published, now_iso
 from .utils import html_to_text, infer_feed_category, infer_publisher_metadata, resolve_entry_link
+
+
+def encode_feed_modified(value) -> str | None:
+    """feedparser modified 값을 DB에 복원 가능한 JSON 배열로 저장한다."""
+    if not value:
+        return None
+    try:
+        return json.dumps(list(value))
+    except TypeError:
+        return None
+
+
+def decode_feed_modified(value: str | None):
+    """DB에 저장된 modified_at JSON 배열을 feedparser가 기대하는 tuple로 복원한다."""
+    if not value:
+        return None
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(decoded, list) or len(decoded) != 9:
+        return None
+    try:
+        return tuple(int(part) for part in decoded)
+    except (TypeError, ValueError):
+        return None
 
 
 def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
@@ -18,6 +45,7 @@ def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
     cur = conn.cursor()
     row = cur.execute("SELECT etag, modified_at FROM feeds WHERE url = ?", (feed_url,)).fetchone()
     etag, modified_at = (row or (None, None))
+    modified = decode_feed_modified(modified_at)
 
     # 오프라인 모드에서는 실수로 외부 HTTP 요청이 나가지 않도록 즉시 건너뛴다.
     if offline and urlparse(feed_url).scheme in {"http", "https"}:
@@ -25,7 +53,7 @@ def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
         return 0
 
     # feedparser가 URL/로컬 파일을 모두 처리하므로 테스트 피드도 같은 경로로 검증할 수 있다.
-    parsed = feedparser.parse(feed_url, etag=etag, modified=modified_at)
+    parsed = feedparser.parse(feed_url, etag=etag, modified=modified)
     if getattr(parsed, "bozo", False):
         print(f"[warn] feed parse issue: {feed_url}")
 
@@ -53,7 +81,7 @@ def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
             bias_type,
             feed_title,
             getattr(parsed, "etag", None),
-            str(getattr(parsed, "modified", None)) if getattr(parsed, "modified", None) else None,
+            encode_feed_modified(getattr(parsed, "modified", None)),
             now_iso(),
         ),
     )

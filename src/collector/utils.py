@@ -1,7 +1,8 @@
 import json
 import os
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urljoin, urlparse
+from urllib.request import url2pathname
 
 from bs4 import BeautifulSoup
 
@@ -340,8 +341,9 @@ def resolve_entry_link(link: str | None, feed_source: str) -> str | None:
         return Path(local_path).resolve().as_uri()
     parsed_feed = urlparse(feed_source)
     if parsed_feed.scheme == "file":
-        # 이미 file:// 형태로 들어온 피드도 상대 링크 기준점을 유지한다.
-        base_dir = os.path.dirname(unquote(parsed_feed.path.lstrip("/")))
+        # file:// URI는 OS별 로컬 경로 규칙에 맞게 변환해야 한다.
+        feed_path = url2pathname(unquote(parsed_feed.path))
+        base_dir = os.path.dirname(feed_path)
         local_path = os.path.join(base_dir, link)
         return Path(local_path).resolve().as_uri()
-    return link
+    return urljoin(feed_source, link)
