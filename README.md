@@ -60,7 +60,7 @@ python main.py --feed https://feeds.bbci.co.uk/news/rss.xml run
 python main.py run
 ```
 
-운영 환경에서는 Supabase Postgres 연결 URL을 넘깁니다.
+운영 환경에서는 Supabase Postgres 연결 URL을 넘깁니다. Supabase/Postgres 스키마는 이 수집기 코드에서 생성하지 않고, 운영 DB의 migration 관리 흐름에서 별도로 준비합니다.
 
 ```powershell
 $env:DATABASE_URL="postgresql://..."
@@ -72,6 +72,8 @@ python main.py run
 ```powershell
 python main.py --database-url "postgresql://..." run
 ```
+
+Supabase/Postgres에서 필요한 테이블이나 컬럼이 없으면 앱은 DDL을 실행하지 않고 에러를 냅니다.
 
 `data/*.db`, `.env`, Python 캐시 파일은 Git에 올리지 않습니다.
 

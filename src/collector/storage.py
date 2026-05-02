@@ -67,6 +67,8 @@ def ensure_db(db_path: str, database_url: str | None = None):
     """실행 환경에 맞는 DB 연결을 만든다.
 
     - `database_url`이 있으면 Supabase/Postgres를 운영 DB로 사용한다.
+      운영 DB 스키마는 별도 migration 흐름에서 관리하므로
+      애플리케이션 시작 시 CREATE/ALTER TABLE을 실행하지 않는다.
     - 없으면 SQLite 파일을 사용한다. 이 경로는 로컬 개발과 테스트용이다.
     """
     if database_url:
@@ -162,89 +164,23 @@ def ensure_sqlite_db(db_path: str) -> sqlite3.Connection:
 
 
 def ensure_postgres_db(database_url: str) -> PostgresConnection:
-    """Supabase/Postgres DB와 필요한 테이블을 준비한다.
+    """Supabase/Postgres DB에 연결하고 migration 적용 여부만 확인한다.
 
-    Supabase는 Postgres 기반이므로 별도 Supabase SDK 없이 psycopg로 직접 저장한다.
-    서버에서는 `DATABASE_URL` 환경변수에 Supabase connection string을 넣어 사용한다.
+    Supabase 운영 스키마는 이 수집기 코드에서 만들지 않는다. 여기서 DDL을 실행하면
+    운영 DB migration 히스토리와 애플리케이션 코드 변경 이력이 어긋날 수 있으므로,
+    앱은 테이블을 만들지 않고 필요한 테이블/컬럼이 없을 때 명확히 실패한다.
     """
     if psycopg is None:
         raise RuntimeError("psycopg is required for Supabase/Postgres. Install requirements.txt first.")
 
     conn = PostgresConnection(psycopg.connect(database_url))
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS feeds (
-            url TEXT PRIMARY KEY,
-            category TEXT,
-            publisher TEXT,
-            bias_type TEXT,
-            title TEXT,
-            etag TEXT,
-            modified_at TEXT,
-            last_checked TEXT
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS articles (
-            id BIGSERIAL PRIMARY KEY,
-            feed_url TEXT,
-            guid TEXT UNIQUE,
-            link TEXT UNIQUE,
-            category TEXT,
-            title TEXT,
-            publisher TEXT,
-            bias_type TEXT,
-            published TEXT,
-            summary TEXT,
-            content TEXT,
-            content_source TEXT,
-            status TEXT,
-            created_at TEXT,
-            updated_at TEXT
-        )
-        """
-    )
-    _ensure_postgres_column(conn, "feeds", "category", "TEXT")
-    _ensure_postgres_column(conn, "feeds", "publisher", "TEXT")
-    _ensure_postgres_column(conn, "feeds", "bias_type", "TEXT")
-    _ensure_postgres_column(conn, "feeds", "modified_at", "TEXT")
-    _ensure_postgres_column(conn, "articles", "category", "TEXT")
-    _ensure_postgres_column(conn, "articles", "publisher", "TEXT")
-    _ensure_postgres_column(conn, "articles", "bias_type", "TEXT")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS article_jobs (
-            id BIGSERIAL PRIMARY KEY,
-            article_id BIGINT UNIQUE REFERENCES articles(id) ON DELETE CASCADE,
-            status TEXT,
-            attempts INTEGER,
-            last_error TEXT,
-            last_attempt_at TEXT,
-            created_at TEXT,
-            updated_at TEXT
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS article_ai_results (
-            id BIGSERIAL PRIMARY KEY,
-            article_id BIGINT UNIQUE REFERENCES articles(id) ON DELETE CASCADE,
-            summary TEXT,
-            abuse_score DOUBLE PRECISION,
-            abuse_label TEXT,
-            keywords JSONB,
-            status TEXT,
-            last_error TEXT,
-            created_at TEXT,
-            updated_at TEXT
-        )
-        """
-    )
-    conn.commit()
-    return conn
+    try:
+        _validate_postgres_schema(conn)
+        conn.commit()
+        return conn
+    except Exception:
+        conn.close()
+        raise
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, column_type: str) -> None:
@@ -254,9 +190,102 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, column_typ
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
 
 
-def _ensure_postgres_column(conn: PostgresConnection, table: str, column: str, column_type: str) -> None:
-    """기존 Postgres 테이블에 새 컬럼이 없으면 추가한다."""
-    conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_type}")
+def _validate_postgres_schema(conn: PostgresConnection) -> None:
+    """운영 DB에 필요한 migration이 적용됐는지 DDL 없이 검증한다."""
+    required_columns = {
+        "feeds": {
+            "url",
+            "category",
+            "publisher",
+            "bias_type",
+            "title",
+            "etag",
+            "modified_at",
+            "last_checked",
+        },
+        "articles": {
+            "id",
+            "feed_url",
+            "guid",
+            "link",
+            "category",
+            "title",
+            "publisher",
+            "bias_type",
+            "published",
+            "summary",
+            "content",
+            "content_source",
+            "status",
+            "created_at",
+            "updated_at",
+        },
+        "article_jobs": {
+            "id",
+            "article_id",
+            "status",
+            "attempts",
+            "last_error",
+            "last_attempt_at",
+            "created_at",
+            "updated_at",
+        },
+        "article_ai_results": {
+            "id",
+            "article_id",
+            "summary",
+            "abuse_score",
+            "abuse_label",
+            "keywords",
+            "status",
+            "last_error",
+            "created_at",
+            "updated_at",
+        },
+    }
+
+    table_names = tuple(required_columns)
+    table_placeholders = ", ".join("?" for _ in table_names)
+    existing_tables = {
+        row[0]
+        for row in conn.execute(
+            f"""
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name IN ({table_placeholders})
+            """,
+            table_names,
+        ).fetchall()
+    }
+    missing_tables = sorted(set(table_names) - existing_tables)
+    if missing_tables:
+        raise RuntimeError(
+            "Supabase/Postgres schema is missing tables: "
+            + ", ".join(missing_tables)
+            + ". Prepare the production schema before running the app."
+        )
+
+    for table, columns in required_columns.items():
+        existing_columns = {
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = ?
+                """,
+                (table,),
+            ).fetchall()
+        }
+        missing_columns = sorted(columns - existing_columns)
+        if missing_columns:
+            raise RuntimeError(
+                f"Supabase/Postgres table '{table}' is missing columns: "
+                + ", ".join(missing_columns)
+                + ". Prepare the production schema before running the app."
+            )
 
 
 def _to_postgres_sql(sql: str) -> str:
