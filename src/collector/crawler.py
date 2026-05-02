@@ -53,6 +53,10 @@ def crawl_articles(conn, min_crawl_len: int, offline: bool, domain_delay: float)
 
     for article_id, link in rows:
         parsed = urlparse(link)
+        skipped_offline_http = offline and parsed.scheme in {"http", "https"}
+        if skipped_offline_http:
+            print(f"[skip] offline mode: {link}")
+            continue
         if parsed.scheme in {"http", "https"}:
             # 같은 도메인에 연속 요청하지 않도록 최소 간격을 둔다.
             host = parsed.netloc

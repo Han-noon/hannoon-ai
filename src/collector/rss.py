@@ -54,6 +54,13 @@ def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
 
     # feedparser가 URL/로컬 파일을 모두 처리하므로 테스트 피드도 같은 경로로 검증할 수 있다.
     parsed = feedparser.parse(feed_url, etag=etag, modified=modified)
+    if getattr(parsed, "status", None) == 304:
+        cur.execute(
+            "UPDATE feeds SET last_checked = ? WHERE url = ?",
+            (now_iso(), feed_url),
+        )
+        conn.commit()
+        return 0
     if getattr(parsed, "bozo", False):
         print(f"[warn] feed parse issue: {feed_url}")
 
