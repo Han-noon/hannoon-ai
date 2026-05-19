@@ -2,14 +2,17 @@ import os
 from openai import OpenAI
 from dotenv import load_dotenv
 
-load_dotenv(override=True)  # 시스템 환경변수보다 .env 파일 값을 우선 적용
-
 
 class OpenAIClient:
     def __init__(self, model: str = "gpt-4.1-mini"):
-        self.api_key = os.getenv("OPENAI_API_KEY")
+        load_dotenv()
+        api_key = os.getenv("OPENAI_API_KEY")
+        
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY 환경변수가 설정되지 않았습니다.")
+
         self.model = model
-        self._client = OpenAI(api_key=self.api_key)
+        self._client = OpenAI(api_key=api_key)
 
     def request(self, prompt: str, **kwargs) -> str:
         response = self._client.chat.completions.create(
@@ -17,4 +20,10 @@ class OpenAIClient:
             messages=[{"role": "user", "content": prompt}],
             **kwargs,
         )
-        return response.choices[0].message.content
+        
+        content = response.choices[0].message.content
+        
+        if content is None:
+            raise ValueError("OpenAI 응답에 content가 없습니다.")
+        
+        return content
