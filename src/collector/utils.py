@@ -102,8 +102,17 @@ PUBLISHER_PATTERNS = [
 ]
 
 
+# 운영 DB category enum 라벨(정치/경제/사회/국제)에 맞춘 매핑.
+CATEGORY_LABELS = {
+    "politics": "정치",
+    "economy": "경제",
+    "society": "사회",
+    "international": "국제",
+}
+
+
 def infer_feed_category(feed_url: str, feed_title: str | None = None) -> str:
-    """피드 URL과 제목을 기반으로 기사 카테고리를 추론한다."""
+    """피드 URL과 제목을 기반으로 기사 카테고리(category enum 라벨)를 추론한다."""
     target = f"{feed_url} {feed_title or ''}".lower()
     category_order = [
         "politics",
@@ -114,21 +123,30 @@ def infer_feed_category(feed_url: str, feed_title: str | None = None) -> str:
     for category in category_order:
         patterns = CATEGORY_PATTERNS[category]
         if any(pattern.lower() in target for pattern in patterns):
-            return category
-    return "other"
+            return CATEGORY_LABELS[category]
+    # category enum에는 'other' 슬롯이 없으므로 매칭 실패 시 '사회'로 기본 매핑한다.
+    return "사회"
+
+
+# 운영 DB bias_type enum 라벨(진보/중도/보수)에 맞춘 매핑.
+BIAS_LABELS = {
+    "left": "진보",
+    "mid": "중도",
+    "right": "보수",
+}
 
 
 def infer_publisher_metadata(feed_url: str, feed_title: str | None = None) -> tuple[str, str]:
-    """피드 URL과 제목으로 언론사 이름과 언론사 기준 성향을 추론한다.
+    """피드 URL과 제목으로 언론사 이름과 언론사 기준 성향(bias_type enum 라벨)을 추론한다.
 
     `bias_type`은 개별 기사 논조 분석 결과가 아니라 언론사 단위 하드코딩 매핑이다.
-    사용 가능한 값은 프로젝트 정책상 `right`, `left`, `mid` 세 가지로 제한한다.
+    PUBLISHER_PATTERNS의 left/mid/right를 운영 enum 라벨 진보/중도/보수로 변환해 반환한다.
     """
     target = f"{feed_url} {feed_title or ''}".lower()
     for publisher, bias_type, patterns in PUBLISHER_PATTERNS:
         if any(pattern.lower() in target for pattern in patterns):
-            return publisher, bias_type
-    return "기타", "mid"
+            return publisher, BIAS_LABELS[bias_type]
+    return "기타", "중도"
 
 
 def _looks_like_url(value: str) -> bool:

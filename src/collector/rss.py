@@ -1,4 +1,4 @@
-import json
+from datetime import datetime
 from urllib.parse import urlparse
 
 import feedparser
@@ -8,27 +8,24 @@ from .utils import html_to_text, infer_feed_category, infer_publisher_metadata, 
 
 
 def encode_feed_modified(value) -> str | None:
-    """feedparser modified 값을 DB에 복원 가능한 JSON 배열로 저장한다."""
+    """feedparser modified(struct_time)를 DB timestamp에 저장할 ISO 문자열로 변환한다."""
     if not value:
         return None
     try:
-        return json.dumps(list(value))
-    except TypeError:
+        # 운영 feeds.modified_at은 timestamp라 9-tuple을 datetime ISO 문자열로 저장한다.
+        return datetime(*value[:6]).isoformat()
+    except (TypeError, ValueError):
         return None
 
 
-def decode_feed_modified(value: str | None):
-    """DB에 저장된 modified_at JSON 배열을 feedparser가 기대하는 tuple로 복원한다."""
+def decode_feed_modified(value):
+    """DB의 modified_at(Postgres datetime / SQLite ISO 문자열)을 feedparser가 받는 datetime으로 복원한다."""
     if not value:
         return None
+    if isinstance(value, datetime):
+        return value
     try:
-        decoded = json.loads(value)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(decoded, list) or len(decoded) != 9:
-        return None
-    try:
-        return tuple(int(part) for part in decoded)
+        return datetime.fromisoformat(value)
     except (TypeError, ValueError):
         return None
 
@@ -121,7 +118,8 @@ def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
         # RSS 요약만으로는 부족한 기사는 원문 페이지 크롤링 대상으로 표시한다.
         needs_crawl = len(content_text) < min_rss_len
         status = "needs_crawl" if needs_crawl else "ready"
-        content_source = "rss" if content_text else None
+        # content_source는 NOT NULL이라 RSS 단계에서는 항상 'rss'로 두고, 크롤 성공 시 'crawl'로 갱신한다.
+        content_source = "rss"
 
         # 원본 HTML 대신 정규화된 텍스트를 저장해 후속 AI 처리 입력을 단순화한다.
         cur.execute(
@@ -136,10 +134,11 @@ def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
                 guid,
                 link,
                 category,
-                entry.get("title"),
+                entry.get("title") or "(제목 없음)",
                 publisher,
                 bias_type,
-                normalize_published(entry.get("published") or entry.get("updated")),
+                # published_at은 NOT NULL이라 RSS에 날짜가 없으면 수집 시각으로 대체한다.
+                normalize_published(entry.get("published") or entry.get("updated")) or now_iso(),
                 html_to_text(summary_html),
                 content_text,
                 content_source,
