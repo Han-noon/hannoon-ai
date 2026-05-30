@@ -53,7 +53,7 @@ class PostgresCursor:
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        self._cursor.close()
+        self.close()
 
 
 class PostgresConnection:
@@ -93,6 +93,12 @@ class PostgresConnection:
 
     def close(self) -> None:
         self._conn.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
 
 
 class SqliteConnection:
@@ -138,6 +144,12 @@ class SqliteConnection:
 
     def close(self) -> None:
         self._conn.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
 
 
 def ensure_db(db_path: str, database_url: str | None = None):

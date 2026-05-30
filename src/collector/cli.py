@@ -71,26 +71,25 @@ def main() -> int:
         return 1
 
     # database_url이 있으면 Supabase/Postgres, 없으면 로컬 SQLite 연결을 만든다.
-    conn = ensure_db(args.db, database_url=args.database_url)
+    with ensure_db(args.db, database_url=args.database_url) as conn:
+        if command in {"fetch", "run"}:
+            total = 0
+            for feed_url in feed_urls:
+                # 피드는 서로 독립적으로 처리해 한 피드의 신규 건수만 로그에서 바로 확인할 수 있게 한다.
+                count = fetch_feed(conn, feed_url, args.min_rss_len, offline=args.offline)
+                print(f"[feed] {feed_url} -> {count} new items")
+                total += count
+            backfill_article_categories(conn)
+            print(f"[done] RSS items inserted: {total}")
 
-    if command in {"fetch", "run"}:
-        total = 0
-        for feed_url in feed_urls:
-            # 피드는 서로 독립적으로 처리해 한 피드의 신규 건수만 로그에서 바로 확인할 수 있게 한다.
-            count = fetch_feed(conn, feed_url, args.min_rss_len, offline=args.offline)
-            print(f"[feed] {feed_url} -> {count} new items")
-            total += count
-        backfill_article_categories(conn)
-        print(f"[done] RSS items inserted: {total}")
-
-    if command in {"crawl", "run"}:
-        updated = crawl_articles(
-            conn,
-            min_crawl_len=args.min_crawl_len,
-            offline=args.offline,
-            domain_delay=args.domain_delay,
-        )
-        print(f"[done] Crawled items updated: {updated}")
+        if command in {"crawl", "run"}:
+            updated = crawl_articles(
+                conn,
+                min_crawl_len=args.min_crawl_len,
+                offline=args.offline,
+                domain_delay=args.domain_delay,
+            )
+            print(f"[done] Crawled items updated: {updated}")
 
     return 0
 
