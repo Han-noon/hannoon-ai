@@ -51,7 +51,8 @@ def crawl_articles(conn, min_crawl_len: int, offline: bool, domain_delay: float)
     last_hit: dict[str, float] = {}
     updated = 0
 
-    for article_id, link in rows:
+    for row in rows:
+        article_id, link = row["id"], row["link"]
         parsed = urlparse(link)
         skipped_offline_http = offline and parsed.scheme in {"http", "https"}
         if skipped_offline_http:

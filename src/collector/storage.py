@@ -4,8 +4,10 @@ from datetime import datetime
 
 try:
     import psycopg
+    from psycopg.rows import dict_row
 except Exception:  # pragma: no cover - optional dependency for local SQLite use
     psycopg = None
+    dict_row = None
 
 try:
     from dateutil import parser as date_parser
@@ -32,7 +34,8 @@ class PostgresCursor:
             sql = f"{sql.rstrip()} RETURNING id"
             self._cursor.execute(sql, params or ())
             row = self._cursor.fetchone()
-            self.lastrowid = row[0] if row else None
+            # 연결에 dict_row를 걸어두므로 RETURNING 결과도 dict로 들어온다.
+            self.lastrowid = row["id"] if row else None
             return self
         self._cursor.execute(sql, params or ())
         return self
@@ -42,6 +45,15 @@ class PostgresCursor:
 
     def fetchall(self):
         return self._cursor.fetchall()
+
+    def close(self) -> None:
+        self._cursor.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._cursor.close()
 
 
 class PostgresConnection:
@@ -54,7 +66,72 @@ class PostgresConnection:
         return PostgresCursor(self._conn.cursor())
 
     def execute(self, sql: str, params: tuple | list | None = None):
+        """쓰기(INSERT/UPDATE/DELETE)나 cursor 직접 제어용. cursor를 반환."""
         return self.cursor().execute(sql, params)
+
+    def query(self, sql: str, params: tuple | list | None = None) -> list:
+        """SELECT → 결과 행 리스트(dict) 반환."""
+        sql = _to_postgres_sql(sql)
+        with self._conn.cursor() as cur:
+            cur.execute(sql, params or ())
+            return cur.fetchall()
+
+    def query_one(self, sql: str, params: tuple | list | None = None):
+        """SELECT → 첫 행만 반환 (없으면 None)."""
+        sql = _to_postgres_sql(sql)
+        with self._conn.cursor() as cur:
+            cur.execute(sql, params or ())
+            return cur.fetchone()
+
+    def transaction(self):
+        """여러 쓰기를 하나로 묶을 때 사용.
+        블록 정상 종료 시 commit, 예외 시 rollback (psycopg 위임)."""
+        return self._conn.transaction()
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+class SqliteConnection:
+    """SQLite 연결에도 Postgres 래퍼와 같은 query/query_one/transaction API를 제공한다.
+
+    기존 수집 코드는 `cursor()`/`execute()`/`commit()`과 `cursor.lastrowid`를 그대로 쓰고,
+    팀의 새 코드는 로컬·운영에서 동일한 query/query_one/transaction을 쓸 수 있게 한다.
+    """
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+
+    def cursor(self) -> sqlite3.Cursor:
+        # 원본 sqlite3 커서를 그대로 노출해 lastrowid 등 기존 동작을 유지한다.
+        return self._conn.cursor()
+
+    def execute(self, sql: str, params: tuple | list | None = None) -> sqlite3.Cursor:
+        return self._conn.execute(sql, params or ())
+
+    def query(self, sql: str, params: tuple | list | None = None) -> list:
+        """SELECT → 결과 행 리스트(sqlite3.Row) 반환."""
+        cur = self._conn.execute(sql, params or ())
+        try:
+            return cur.fetchall()
+        finally:
+            cur.close()
+
+    def query_one(self, sql: str, params: tuple | list | None = None):
+        """SELECT → 첫 행만 반환 (없으면 None)."""
+        cur = self._conn.execute(sql, params or ())
+        try:
+            return cur.fetchone()
+        finally:
+            cur.close()
+
+    def transaction(self):
+        """여러 쓰기를 하나로 묶을 때 사용.
+        sqlite3.Connection은 컨텍스트 매니저로 정상 종료 시 commit, 예외 시 rollback 한다."""
+        return self._conn
 
     def commit(self) -> None:
         self._conn.commit()
@@ -76,12 +153,14 @@ def ensure_db(db_path: str, database_url: str | None = None):
     return ensure_sqlite_db(db_path)
 
 
-def ensure_sqlite_db(db_path: str) -> sqlite3.Connection:
+def ensure_sqlite_db(db_path: str) -> "SqliteConnection":
     """SQLite DB와 필요한 테이블을 준비한다."""
     db_dir = os.path.dirname(db_path)
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
     conn = sqlite3.connect(db_path)
+    # 컬럼명 접근(row["name"])을 지원하면서도 인덱스 접근(row[0])과 호환된다.
+    conn.row_factory = sqlite3.Row
     # 수집 중 읽기/쓰기가 겹쳐도 잠금 충돌을 줄이기 위해 WAL 모드를 사용한다.
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -110,7 +189,7 @@ def ensure_sqlite_db(db_path: str) -> sqlite3.Connection:
             title TEXT,
             publisher TEXT,
             bias_type TEXT,
-            published TEXT,
+            published_at TEXT,
             summary TEXT,
             content TEXT,
             content_source TEXT,
@@ -130,6 +209,7 @@ def ensure_sqlite_db(db_path: str) -> sqlite3.Connection:
     _ensure_column(conn, "articles", "category", "TEXT")
     _ensure_column(conn, "articles", "publisher", "TEXT")
     _ensure_column(conn, "articles", "bias_type", "TEXT")
+    _ensure_column(conn, "articles", "published_at", "TEXT")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS article_jobs (
@@ -160,7 +240,7 @@ def ensure_sqlite_db(db_path: str) -> sqlite3.Connection:
         )
         """
     )
-    return conn
+    return SqliteConnection(conn)
 
 
 def ensure_postgres_db(database_url: str) -> PostgresConnection:
@@ -173,7 +253,8 @@ def ensure_postgres_db(database_url: str) -> PostgresConnection:
     if psycopg is None:
         raise RuntimeError("psycopg is required for Supabase/Postgres. Install requirements.txt first.")
 
-    conn = PostgresConnection(psycopg.connect(database_url))
+    # dict_row를 걸면 하위 커서까지 상속되어 결과를 컬럼명으로 접근할 수 있다.
+    conn = PostgresConnection(psycopg.connect(database_url, row_factory=dict_row))
     try:
         _validate_postgres_schema(conn)
         conn.commit()
@@ -212,7 +293,7 @@ def _validate_postgres_schema(conn: PostgresConnection) -> None:
             "title",
             "publisher",
             "bias_type",
-            "published",
+            "published_at",
             "summary",
             "content",
             "content_source",
@@ -247,7 +328,7 @@ def _validate_postgres_schema(conn: PostgresConnection) -> None:
     table_names = tuple(required_columns)
     table_placeholders = ", ".join("?" for _ in table_names)
     existing_tables = {
-        row[0]
+        row["table_name"]
         for row in conn.execute(
             f"""
             SELECT table_name
@@ -268,7 +349,7 @@ def _validate_postgres_schema(conn: PostgresConnection) -> None:
 
     for table, columns in required_columns.items():
         existing_columns = {
-            row[0]
+            row["column_name"]
             for row in conn.execute(
                 """
                 SELECT column_name

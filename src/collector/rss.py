@@ -44,7 +44,8 @@ def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
     # 이전 수집 시점의 ETag/modified_at을 넘겨 서버가 변경분만 응답할 수 있게 한다.
     cur = conn.cursor()
     row = cur.execute("SELECT etag, modified_at FROM feeds WHERE url = ?", (feed_url,)).fetchone()
-    etag, modified_at = (row or (None, None))
+    etag = row["etag"] if row else None
+    modified_at = row["modified_at"] if row else None
     modified = decode_feed_modified(modified_at)
 
     # 오프라인 모드에서는 실수로 외부 HTTP 요청이 나가지 않도록 즉시 건너뛴다.
@@ -126,7 +127,7 @@ def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
         cur.execute(
             """
             INSERT INTO articles (
-                feed_url, guid, link, category, title, publisher, bias_type, published, summary, content,
+                feed_url, guid, link, category, title, publisher, bias_type, published_at, summary, content,
                 content_source, status, created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
