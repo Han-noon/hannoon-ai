@@ -11,11 +11,6 @@ on:
 permissions:
   contents: read
 
-# 동시에 같은 배포가 여러 번 겹치지 않게 방지
-concurrency:
-  group: hannoon-ai-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 env:
   APP_DIR: /home/ubuntu/hannoon-ai
   PYTHON_VERSION: "3.12"
@@ -24,6 +19,9 @@ jobs:
   ci:
     name: Python checks
     runs-on: ubuntu-latest
+    concurrency:
+      group: hannoon-ai-ci-${{ github.ref }}
+      cancel-in-progress: true
 
     steps:
       - name: Checkout
@@ -54,6 +52,9 @@ jobs:
     needs: ci
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
+    concurrency:
+      group: hannoon-ai-deploy-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
