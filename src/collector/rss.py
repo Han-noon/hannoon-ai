@@ -3,7 +3,7 @@ from urllib.parse import urlparse
 
 import feedparser
 
-from .storage import enqueue_article_job, normalize_published, now_iso
+from .storage import normalize_published, now_iso
 from .utils import html_to_text, infer_feed_category, infer_publisher_metadata, resolve_entry_link
 
 
@@ -63,9 +63,10 @@ def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
         print(f"[warn] feed parse issue: {feed_url}")
 
     # 피드 메타데이터는 신규 기사 여부와 무관하게 마지막 확인 시각을 갱신한다.
-    feed_title = getattr(parsed.feed, "title", None)
-    category = infer_feed_category(feed_url, feed_title)
-    publisher, bias_type = infer_publisher_metadata(feed_url, feed_title)
+    parsed_feed_title = getattr(parsed.feed, "title", None)
+    category = infer_feed_category(feed_url, parsed_feed_title)
+    publisher, bias_type = infer_publisher_metadata(feed_url, parsed_feed_title)
+    feed_title = parsed_feed_title or feed_url
     cur.execute(
         """
         INSERT INTO feeds (url, category, publisher, bias_type, title, etag, modified_at, last_checked)
@@ -115,9 +116,8 @@ def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
         summary_html = entry.get("summary") or entry.get("description") or ""
         content_text = html_to_text(content_html) or html_to_text(summary_html)
 
-        # RSS 요약만으로는 부족한 기사는 원문 페이지 크롤링 대상으로 표시한다.
-        needs_crawl = len(content_text) < min_rss_len
-        status = "needs_crawl" if needs_crawl else "ready"
+        # RSS content/summary는 신뢰 불가능. 항상 크롤링하도록 수정
+        status = "needs_crawl"
         # content_source는 NOT NULL이라 RSS 단계에서는 항상 'rss'로 두고, 크롤 성공 시 'crawl'로 갱신한다.
         content_source = "rss"
 
@@ -148,9 +148,6 @@ def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
             ),
         )
         article_id = cur.lastrowid
-        # RSS 단계에서 이미 충분한 본문이 있으면 크롤링 없이 바로 article_jobs에 넣는다.
-        if status == "ready":
-            enqueue_article_job(conn, article_id)
         inserted += 1
 
     conn.commit()

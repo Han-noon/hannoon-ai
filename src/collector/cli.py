@@ -76,7 +76,12 @@ def main() -> int:
             total = 0
             for feed_url in feed_urls:
                 # 피드는 서로 독립적으로 처리해 한 피드의 신규 건수만 로그에서 바로 확인할 수 있게 한다.
-                count = fetch_feed(conn, feed_url, args.min_rss_len, offline=args.offline)
+                try:
+                    count = fetch_feed(conn, feed_url, args.min_rss_len, offline=args.offline)
+                except Exception as exc:
+                    conn.rollback()
+                    print(f"[warn] feed failed: {feed_url} ({exc})")
+                    continue
                 print(f"[feed] {feed_url} -> {count} new items")
                 total += count
             backfill_article_categories(conn)
