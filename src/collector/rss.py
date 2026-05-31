@@ -117,7 +117,7 @@ def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
         content_text = html_to_text(content_html) or html_to_text(summary_html)
 
         # RSS content/summary는 신뢰 불가능. 항상 크롤링하도록 수정
-        status = "needs_crawl"
+        status = "needs_crawl" if link else "crawl_failed"
         # content_source는 NOT NULL이라 RSS 단계에서는 항상 'rss'로 두고, 크롤 성공 시 'crawl'로 갱신한다.
         content_source = "rss"
 
