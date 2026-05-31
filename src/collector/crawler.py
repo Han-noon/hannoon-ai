@@ -89,8 +89,11 @@ def crawl_articles(conn, min_crawl_len: int, offline: bool, domain_delay: float)
                 (text, "crawl", "ready", now_iso(), article_id),
             )
             enqueue_article_job(conn, article_id)
+            print(f"[crawl] {link} -> ready ({len(text)} chars)")
             updated += 1
         else:
+            text_len = len(text) if text else 0
+            print(f"[warn] crawl failed: {link} (content too short: {text_len} chars)")
             # 너무 짧은 본문은 광고/캡션/요약만 잡힌 가능성이 높아 실패로 분류한다.
             cur.execute(
                 "UPDATE articles SET status = ?, updated_at = ? WHERE id = ?",
