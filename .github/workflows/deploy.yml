@@ -1,0 +1,136 @@
+name: CI/CD
+
+on:
+  push:
+    branches: ["develop"]
+  pull_request:
+    branches: ["develop"]
+  workflow_dispatch:
+
+# Github Actions가 이 Repo에 대해 가질 권한(코드 읽기만 허용)
+permissions:
+  contents: read
+
+# 동시에 같은 배포가 여러 번 겹치지 않게 방지
+concurrency:
+  group: hannoon-ai-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_DIR: /home/ubuntu/hannoon-ai
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  ci:
+    name: Python checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Compile Python files
+        run: |
+          python -m compileall -q main.py src
+
+      - name: CLI smoke test
+        run: |
+          python main.py --help
+
+  deploy:
+    name: Deploy to EC2
+    needs: ci
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate deployment secrets
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$EC2_HOST"
+          test -n "$EC2_USER"
+          test -n "$EC2_SSH_KEY"
+
+      - name: Configure SSH
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/ec2_key
+          chmod 600 ~/.ssh/ec2_key
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+      - name: Prepare EC2
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/ec2_key "$EC2_USER@$EC2_HOST" "
+            set -e
+            if ! command -v rsync >/dev/null 2>&1 || ! python3 -m venv --help >/dev/null 2>&1; then
+              sudo apt-get update
+              sudo apt-get install -y python3 python3-venv python3-pip rsync
+            fi
+            mkdir -p '${APP_DIR}/logs' '${APP_DIR}/data'
+          "
+
+      - name: Upload project files
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          set -euo pipefail
+          rsync -az --delete \
+            --exclude ".git" \
+            --exclude ".github" \
+            --exclude ".env" \
+            --exclude ".venv" \
+            --exclude ".idea" \
+            --exclude "__pycache__" \
+            --exclude "*.pyc" \
+            --exclude "*.egg-info" \
+            --exclude ".pytest_cache" \
+            --exclude "logs" \
+            --exclude "data/*.db" \
+            --exclude "data/*.db-shm" \
+            --exclude "data/*.db-wal" \
+            --exclude "*.pdf" \
+            -e "ssh -i ~/.ssh/ec2_key" \
+            ./ "$EC2_USER@$EC2_HOST:${APP_DIR}/"
+
+      - name: Install EC2 dependencies
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/ec2_key "$EC2_USER@$EC2_HOST" "
+            set -e
+            cd '${APP_DIR}'
+            python3 -m venv .venv
+            .venv/bin/python -m pip install --upgrade pip
+            .venv/bin/python -m pip install -r requirements.txt
+            .venv/bin/python -m compileall -q main.py src
+          "
