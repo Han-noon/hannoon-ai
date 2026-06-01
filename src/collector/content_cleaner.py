@@ -123,6 +123,8 @@ def clean_article_text(text: str, client: CompletionClient) -> str:
         response_format={"type": "json_object"},
     )
     data = _parse_json_object(response)
+    if not isinstance(data, dict):
+        raise ValueError("LLM cleanup response must be a JSON object.")
     cleaned = data.get("content")
     if not isinstance(cleaned, str):
         raise ValueError("LLM cleanup response is missing string field 'content'.")
