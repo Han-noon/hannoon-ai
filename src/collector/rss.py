@@ -39,8 +39,7 @@ def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
     링크를 대체 키로 사용한다.
     """
     # 이전 수집 시점의 ETag/modified_at을 넘겨 서버가 변경분만 응답할 수 있게 한다.
-    cur = conn.cursor()
-    row = cur.execute("SELECT etag, modified_at FROM feeds WHERE url = ?", (feed_url,)).fetchone()
+    row = conn.query_one("SELECT etag, modified_at FROM feeds WHERE url = ?", (feed_url,))
     etag = row["etag"] if row else None
     modified_at = row["modified_at"] if row else None
     modified = decode_feed_modified(modified_at)
@@ -53,7 +52,7 @@ def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
     # feedparser가 URL/로컬 파일을 모두 처리하므로 테스트 피드도 같은 경로로 검증할 수 있다.
     parsed = feedparser.parse(feed_url, etag=etag, modified=modified)
     if getattr(parsed, "status", None) == 304:
-        cur.execute(
+        conn.execute(
             "UPDATE feeds SET last_checked = ? WHERE url = ?",
             (now_iso(), feed_url),
         )
@@ -67,7 +66,7 @@ def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
     category = infer_feed_category(feed_url, parsed_feed_title)
     publisher, bias_type = infer_publisher_metadata(feed_url, parsed_feed_title)
     feed_title = parsed_feed_title or feed_url
-    cur.execute(
+    conn.execute(
         """
         INSERT INTO feeds (url, category, publisher, bias_type, title, etag, modified_at, last_checked)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -103,9 +102,9 @@ def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
         # DB UNIQUE 제약도 있지만, 사전에 건너뛰면 불필요한 예외/롤백 흐름을 피할 수 있다.
         existing = None
         if guid:
-            existing = cur.execute("SELECT id FROM articles WHERE guid = ?", (guid,)).fetchone()
+            existing = conn.query_one("SELECT id FROM articles WHERE guid = ?", (guid,))
         if not existing and link:
-            existing = cur.execute("SELECT id FROM articles WHERE link = ?", (link,)).fetchone()
+            existing = conn.query_one("SELECT id FROM articles WHERE link = ?", (link,))
         if existing:
             continue
 
@@ -122,7 +121,7 @@ def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
         content_source = "rss"
 
         # 원본 HTML 대신 정규화된 텍스트를 저장해 후속 AI 처리 입력을 단순화한다.
-        cur.execute(
+        conn.execute(
             """
             INSERT INTO articles (
                 feed_url, guid, link, category, title, publisher, bias_type, published_at, summary, content,
@@ -147,7 +146,6 @@ def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
                 now_iso(),
             ),
         )
-        article_id = cur.lastrowid
         inserted += 1
 
     conn.commit()
