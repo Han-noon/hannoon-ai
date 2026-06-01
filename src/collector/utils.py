@@ -174,7 +174,7 @@ def html_to_text(html: str | None) -> str:
 def _strip_unwanted(soup: BeautifulSoup) -> None:
     """본문 후보 탐색 전에 명백한 비본문 영역을 제거한다."""
     # 본문 후보 점수를 왜곡하는 스크립트/내비게이션/광고성 영역을 먼저 제거한다.
-    for tag in soup(["script", "style", "noscript", "iframe", "svg"]):
+    for tag in soup(["script", "style", "noscript", "iframe", "svg", "video"]):
         tag.decompose()
     for tag in soup.find_all(["nav", "header", "footer", "aside", "form"]):
         tag.decompose()
@@ -197,6 +197,8 @@ def _strip_unwanted(soup: BeautifulSoup) -> None:
             "ad",
             "ads",
             "banner",
+            "player",
+            "vod",
         }
         if tokens.intersection(unwanted_tokens):
             tag.decompose()
@@ -283,6 +285,32 @@ def _extract_jtbc_query_content(html: str) -> str:
     return html_to_text(content_html)
 
 
+ARTICLE_BODY_SELECTORS = [
+    '[itemprop="articleBody"]',
+    "#newsViewArea",
+    "#articleBody",
+    ".article_body",
+    ".article-body",
+    ".article-content",
+    ".news_body",
+    ".news-body",
+]
+
+
+def _extract_declared_article_body(soup: BeautifulSoup) -> str:
+    """명시적인 본문 컨테이너가 있으면 범용 점수화보다 먼저 사용한다."""
+    for selector in ARTICLE_BODY_SELECTORS:
+        node = soup.select_one(selector)
+        if node is None:
+            continue
+        fragment = BeautifulSoup(str(node), "html.parser")
+        _strip_unwanted(fragment)
+        text = " ".join(fragment.get_text(" ", strip=True).split())
+        if len(text) >= 200:
+            return text
+    return ""
+
+
 def extract_article_text(html: str) -> str:
     """HTML에서 기사 본문 텍스트를 추출한다.
 
@@ -301,6 +329,10 @@ def extract_article_text(html: str) -> str:
         soup = BeautifulSoup(html, "html.parser")
     except Exception:
         return ""
+    declared_text = _extract_declared_article_body(soup)
+    if declared_text:
+        return declared_text
+
     _strip_unwanted(soup)
 
     candidates = []
