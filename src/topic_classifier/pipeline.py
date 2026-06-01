@@ -178,10 +178,13 @@ def run(conn) -> int:
                 result_lit = to_vector_literal(embed(cr["result"]))
                 topic_causes.add_cause(conn, topic_id, cr["result"], result_lit)
 
-                # 5-4. 이벤트 체인 연결 (동일 토픽 내 시간순)
-                prev_id = events.find_prev_event_id(conn, topic_id, ev.id)
-                if prev_id is not None:
-                    events.link_chain(conn, prev_id, ev.id)
+                # 5-4. 이벤트 체인 연결 (동일 토픽 내 시간순, linked-list 삽입)
+                prev = events.find_prev_event(conn, topic_id, ev.id)
+                if prev is not None:
+                    prev_id, next_id = prev["id"], prev["next_event_id"]
+                else:
+                    prev_id, next_id = None, events.find_next_event_id(conn, topic_id, ev.id)
+                events.link_into_chain(conn, ev.id, prev_id, next_id)
 
             processed += 1
             action_label = "create" if decision["action"] == "create" else f"assign → {topic_id}"

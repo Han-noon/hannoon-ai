@@ -34,23 +34,37 @@ LIMIT ?
 # 이벤트에 토픽을 배정하고 배정 근거(reason)를 기록한다.
 ASSIGN_TOPIC_SQL = "UPDATE events SET topic_id = ?, reason = ? WHERE id = ?"
 
-# 같은 토픽에서 가장 최근에 배정된 이벤트를 조회한다.
-# 새 이벤트는 항상 해당 토픽의 마지막 노드 뒤에 연결되므로
-# 시각 기준 필터 없이 단순 내림차순 정렬로 직전 노드를 찾는다.
+# 같은 토픽에서 (created_at, id) 기준 직전 노드와 그 노드의 기존 next를 조회한다.
+# next 컬럼을 함께 가져오므로 중간 삽입 시 별도 next 조회 없이 처리할 수 있다.
+# (created_at, id) < 현재 이벤트: < 비교가 자기 자신을 자동 제외한다.
 FIND_PREV_EVENT_SQL = """
-SELECT id
+SELECT id, next_event_id
 FROM events
 WHERE topic_id = ?
-  AND id <> ?
-ORDER BY created_at DESC
+  AND (created_at, id) < (SELECT created_at, id FROM events WHERE id = ?)
+ORDER BY created_at DESC, id DESC
 LIMIT 1
 """
 
-# 현재 이벤트의 prev_event_id를 설정한다 (params: prev_id, current_id).
-UPDATE_PREV_EVENT_SQL = "UPDATE events SET prev_event_id = ? WHERE id = ?"
+# (created_at, id) 기준 직후 노드를 조회한다.
+# prev가 없을 때(현재 이벤트가 토픽 내 가장 과거 노드)만 호출해 기존 head를 찾는다.
+FIND_NEXT_EVENT_SQL = """
+SELECT id
+FROM events
+WHERE topic_id = ?
+  AND (created_at, id) > (SELECT created_at, id FROM events WHERE id = ?)
+ORDER BY created_at ASC, id ASC
+LIMIT 1
+"""
 
-# 직전 이벤트의 next_event_id를 설정한다 (params: current_id, prev_id).
+# 현재 이벤트의 prev/next를 동시에 설정한다 (params: prev_id, next_id, current_id).
+UPDATE_CHAIN_SQL = "UPDATE events SET prev_event_id = ?, next_event_id = ? WHERE id = ?"
+
+# 직전 이벤트의 next_event_id를 설정한다 (params: new_next_id, target_id).
 UPDATE_NEXT_EVENT_SQL = "UPDATE events SET next_event_id = ? WHERE id = ?"
+
+# 직후 이벤트의 prev_event_id를 설정한다 (params: new_prev_id, target_id).
+UPDATE_PREV_EVENT_SQL = "UPDATE events SET prev_event_id = ? WHERE id = ?"
 
 
 # ── Repository 함수 ─────────────────────────────────────────────────────────
@@ -70,24 +84,36 @@ def assign_topic(conn, event_id: int, topic_id: int, reason: str | None) -> None
     conn.execute(ASSIGN_TOPIC_SQL, (topic_id, reason, event_id))
 
 
-def find_prev_event_id(conn, topic_id: int, event_id: int) -> int | None:
-    """같은 토픽에서 현재 이벤트 직전(created_at 기준)에 배정된 이벤트 id를 반환한다.
+def find_prev_event(conn, topic_id: int, event_id: int):
+    """같은 토픽에서 (created_at, id) 기준 직전 노드를 반환한다.
 
-    없으면 None (현재 이벤트가 해당 토픽의 첫 번째 노드).
+    반환값: {"id": int, "next_event_id": int | None} 또는 None.
     트랜잭션 내에서 호출해야 assign_topic 결과가 반영된 상태를 읽는다.
     """
-    row = conn.query_one(FIND_PREV_EVENT_SQL, (topic_id, event_id))
+    return conn.query_one(FIND_PREV_EVENT_SQL, (topic_id, event_id))
+
+
+def find_next_event_id(conn, topic_id: int, event_id: int) -> int | None:
+    """같은 토픽에서 (created_at, id) 기준 직후 노드 id를 반환한다.
+
+    prev가 없을 때(현재 이벤트가 토픽 내 가장 과거)만 호출해 기존 head를 찾는다.
+    트랜잭션 내에서 호출한다.
+    """
+    row = conn.query_one(FIND_NEXT_EVENT_SQL, (topic_id, event_id))
     return row["id"] if row else None
 
 
-def link_chain(conn, prev_id: int, current_id: int) -> None:
-    """직전 이벤트(prev_id)와 현재 이벤트(current_id)를 양방향으로 연결한다.
+def link_into_chain(conn, current_id: int, prev_id: int | None, next_id: int | None) -> None:
+    """current를 prev↔current↔next 위치에 doubly-linked list 삽입한다.
 
-    - current.prev_event_id = prev_id
-    - prev.next_event_id   = current_id
+    - current.prev = prev_id / current.next = next_id
+    - prev 있으면 prev.next = current_id
+    - next 있으면 next.prev = current_id
 
-    두 UPDATE를 호출 측 트랜잭션 내에서 원자적으로 실행하기 위해
-    이 함수 자체는 트랜잭션을 열지 않는다.
+    호출 측 트랜잭션 내에서 원자적으로 실행한다.
     """
-    conn.execute(UPDATE_PREV_EVENT_SQL, (prev_id, current_id))
-    conn.execute(UPDATE_NEXT_EVENT_SQL, (current_id, prev_id))
+    conn.execute(UPDATE_CHAIN_SQL, (prev_id, next_id, current_id))
+    if prev_id is not None:
+        conn.execute(UPDATE_NEXT_EVENT_SQL, (current_id, prev_id))
+    if next_id is not None:
+        conn.execute(UPDATE_PREV_EVENT_SQL, (current_id, next_id))
