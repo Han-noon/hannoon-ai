@@ -50,7 +50,7 @@ def _validate_topic_schema(conn) -> None:
         "events": {
             "id", "topic_id", "category", "title", "summary",
             "article_count", "abusing_count", "created_at",
-            "prev_event_id", "next_event_id",
+            "prev_event_id", "next_event_id", "reason",
         },
         "topics": {"id", "category", "title", "summary"},
         "topic_causes": {"id", "topic_id", "cause_text", "cause_embedding"},
@@ -159,10 +159,26 @@ def run(conn) -> int:
             print(f"[topic] event {ev.id}  action: {decision['action']}"
                   + (f"  reason: {decision['reason']}" if decision.get("reason") else ""))
 
+            # action 값·필수 키·topic_id 유효성 검증 (트랜잭션 진입 전)
+            action = decision["action"]
+            if action not in {"assign", "create"}:
+                raise ValueError(f"LLM이 알 수 없는 action을 반환했습니다: {action!r}")
+            if action == "create":
+                if "new_title" not in decision:
+                    raise ValueError("action=create인데 new_title이 없습니다.")
+            else:
+                if "topic_id" not in decision:
+                    raise ValueError("action=assign인데 topic_id가 없습니다.")
+                candidate_ids = {c.topic_id for c in candidates}
+                if int(decision["topic_id"]) not in candidate_ids:
+                    raise ValueError(
+                        f"LLM이 후보에 없는 topic_id={decision['topic_id']}를 반환했습니다."
+                    )
+
             # 5단계: 토픽 확정·매핑·cause 누적·체인 연결을 단일 트랜잭션으로
             with conn.transaction():
                 # 5-1. 토픽 확정
-                if decision["action"] == "create":
+                if action == "create":
                     # title만 LLM이 생성한 값 사용, category·summary는 이벤트 값 그대로
                     topic_id = topics.create_topic(
                         conn, ev.category, decision["new_title"], ev.summary
