@@ -47,7 +47,9 @@ LIMIT 1
 """
 
 # (created_at, id) 기준 직후 노드를 조회한다.
-# prev가 없을 때(현재 이벤트가 토픽 내 가장 과거 노드)만 호출해 기존 head를 찾는다.
+# 엣지 케이스: 임계치 미달로 제외됐다 뒤늦게 배정된 이벤트가 기존 토픽의 가장 과거
+# 노드보다도 더 과거인 경우, FIND_PREV_EVENT_SQL 결과가 None이 된다.
+# 이때 이 쿼리로 기존 head(직후 노드)를 찾아 새 이벤트를 체인 앞에 삽입한다.
 FIND_NEXT_EVENT_SQL = """
 SELECT id
 FROM events
@@ -96,7 +98,9 @@ def find_prev_event(conn, topic_id: int, event_id: int):
 def find_next_event_id(conn, topic_id: int, event_id: int) -> int | None:
     """같은 토픽에서 (created_at, id) 기준 직후 노드 id를 반환한다.
 
-    prev가 없을 때(현재 이벤트가 토픽 내 가장 과거)만 호출해 기존 head를 찾는다.
+    엣지 케이스: 임계치 미달로 제외됐다 뒤늦게 배정된 이벤트가 기존 토픽의 가장 과거
+    노드보다도 더 과거인 경우, find_prev_event() 결과가 None이 된다.
+    이때 이 쿼리로 기존 head(직후 노드)를 찾아 새 이벤트를 체인 앞에 삽입한다.
     트랜잭션 내에서 호출한다.
     """
     row = conn.query_one(FIND_NEXT_EVENT_SQL, (topic_id, event_id))
