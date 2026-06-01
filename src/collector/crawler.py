@@ -44,10 +44,9 @@ def crawl_articles(conn, min_crawl_len: int, offline: bool, domain_delay: float)
     높으므로 `crawl_failed`로 남긴다. 개별 기사 실패는 전체 배치를 중단하지 않고
     다음 기사로 넘어간다.
     """
-    cur = conn.cursor()
-    rows = cur.execute(
+    rows = conn.query(
         "SELECT id, link FROM articles WHERE status = 'needs_crawl' AND link IS NOT NULL"
-    ).fetchall()
+    )
     last_hit: dict[str, float] = {}
     updated = 0
 
@@ -72,7 +71,7 @@ def crawl_articles(conn, min_crawl_len: int, offline: bool, domain_delay: float)
         except Exception as exc:
             # 개별 기사 실패가 전체 배치를 멈추지 않도록 상태만 남기고 다음 기사로 넘어간다.
             print(f"[warn] crawl failed: {link} ({exc})")
-            cur.execute(
+            conn.execute(
                 "UPDATE articles SET status = ?, updated_at = ? WHERE id = ?",
                 ("crawl_failed", now_iso(), article_id),
             )
@@ -80,26 +79,27 @@ def crawl_articles(conn, min_crawl_len: int, offline: bool, domain_delay: float)
 
         if text and len(text) >= min_crawl_len:
             # 충분한 본문을 확보한 기사만 후속 AI 처리 큐로 넘긴다.
-            cur.execute(
-                """
-                UPDATE articles
-                SET content = ?, content_source = ?, status = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (text, "crawl", "ready", now_iso(), article_id),
-            )
-            enqueue_article_job(conn, article_id)
+            # 상태 UPDATE와 큐 INSERT를 한 트랜잭션으로 묶어 기사 단위로 원자적으로 커밋한다.
+            with conn.transaction():
+                conn.execute(
+                    """
+                    UPDATE articles
+                    SET content = ?, content_source = ?, status = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (text, "crawl", "ready", now_iso(), article_id),
+                )
+                enqueue_article_job(conn, article_id)
             print(f"[crawl] {link} -> ready ({len(text)} chars)")
             updated += 1
         else:
             text_len = len(text) if text else 0
             print(f"[warn] crawl failed: {link} (content too short: {text_len} chars)")
             # 너무 짧은 본문은 광고/캡션/요약만 잡힌 가능성이 높아 실패로 분류한다.
-            cur.execute(
+            conn.execute(
                 "UPDATE articles SET status = ?, updated_at = ? WHERE id = ?",
                 ("crawl_failed", now_iso(), article_id),
             )
 
-    conn.commit()
     return updated
 

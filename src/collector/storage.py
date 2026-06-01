@@ -1,6 +1,12 @@
 import os
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime
+
+# DB 연결은 SQLite/Postgres 모두 autocommit으로 둔다(아래 ensure_* 참고).
+# 따라서 단발 쓰기는 즉시 커밋되고, 원자적으로 묶어야 하는 다중 쓰기만
+# `with conn.transaction():` 블록으로 감싼다. transaction() 중첩은 금지한다
+# (sqlite는 중첩 BEGIN 불가, psycopg는 savepoint라 종료해도 커밋되지 않는다).
 
 try:
     import psycopg
@@ -137,10 +143,19 @@ class SqliteConnection:
         finally:
             cur.close()
 
+    @contextmanager
     def transaction(self):
         """여러 쓰기를 하나로 묶을 때 사용.
-        sqlite3.Connection은 컨텍스트 매니저로 정상 종료 시 commit, 예외 시 rollback 한다."""
-        return self._conn
+        연결이 autocommit(isolation_level=None)이라 명시적으로 BEGIN/COMMIT을 발행해야
+        그룹 원자성이 생긴다. 정상 종료 시 commit, 예외 시 rollback 후 예외를 다시 던진다."""
+        self._conn.execute("BEGIN")
+        try:
+            yield self
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+        else:
+            self._conn.execute("COMMIT")
 
     def commit(self) -> None:
         self._conn.commit()
@@ -176,7 +191,9 @@ def ensure_sqlite_db(db_path: str) -> "SqliteConnection":
     db_dir = os.path.dirname(db_path)
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    # isolation_level=None으로 autocommit. 단발 쓰기는 즉시 커밋되고, 다중 쓰기는
+    # SqliteConnection.transaction()의 명시적 BEGIN/COMMIT으로 묶는다(Postgres와 의미 일치).
+    conn = sqlite3.connect(db_path, isolation_level=None)
     # 컬럼명 접근(row["name"])을 지원하면서도 인덱스 접근(row[0])과 호환된다.
     conn.row_factory = sqlite3.Row
     # 수집 중 읽기/쓰기가 겹쳐도 잠금 충돌을 줄이기 위해 WAL 모드를 사용한다.
@@ -272,10 +289,11 @@ def ensure_postgres_db(database_url: str) -> PostgresConnection:
         raise RuntimeError("psycopg is required for Supabase/Postgres. Install requirements.txt first.")
 
     # dict_row를 걸면 하위 커서까지 상속되어 결과를 컬럼명으로 접근할 수 있다.
-    conn = PostgresConnection(psycopg.connect(database_url, row_factory=dict_row))
+    # autocommit=True면 SELECT 후 즉시 IDLE로 돌아가, 이어지는 transaction() 블록이
+    # 항상 트랜잭션을 소유(BEGIN/COMMIT)한다. 단발 쓰기는 즉시 커밋된다.
+    conn = PostgresConnection(psycopg.connect(database_url, row_factory=dict_row, autocommit=True))
     try:
         _validate_postgres_schema(conn)
-        conn.commit()
         return conn
     except Exception:
         conn.close()
@@ -400,58 +418,59 @@ def _is_article_insert(sql: str) -> bool:
 def backfill_article_categories(conn) -> None:
     """이미 저장된 기사 중 category가 비어 있는 행을 피드 기준으로 보정한다."""
     # 피드 메타데이터가 채워진 뒤 기존 기사에도 같은 값을 반영한다.
-    conn.execute(
-        """
-        UPDATE articles
-        SET category = (
-            SELECT feeds.category
-            FROM feeds
-            WHERE feeds.url = articles.feed_url
+    # 세 컬럼 보정을 한 트랜잭션으로 묶어 일부만 반영되는 상태를 막는다.
+    with conn.transaction():
+        conn.execute(
+            """
+            UPDATE articles
+            SET category = (
+                SELECT feeds.category
+                FROM feeds
+                WHERE feeds.url = articles.feed_url
+            )
+            WHERE category IS NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM feeds
+                  WHERE feeds.url = articles.feed_url
+                    AND feeds.category IS NOT NULL
+              )
+            """
         )
-        WHERE category IS NULL
-          AND EXISTS (
-              SELECT 1
-              FROM feeds
-              WHERE feeds.url = articles.feed_url
-                AND feeds.category IS NOT NULL
-          )
-        """
-    )
-    conn.execute(
-        """
-        UPDATE articles
-        SET publisher = (
-            SELECT feeds.publisher
-            FROM feeds
-            WHERE feeds.url = articles.feed_url
+        conn.execute(
+            """
+            UPDATE articles
+            SET publisher = (
+                SELECT feeds.publisher
+                FROM feeds
+                WHERE feeds.url = articles.feed_url
+            )
+            WHERE publisher IS NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM feeds
+                  WHERE feeds.url = articles.feed_url
+                    AND feeds.publisher IS NOT NULL
+              )
+            """
         )
-        WHERE publisher IS NULL
-          AND EXISTS (
-              SELECT 1
-              FROM feeds
-              WHERE feeds.url = articles.feed_url
-                AND feeds.publisher IS NOT NULL
-          )
-        """
-    )
-    conn.execute(
-        """
-        UPDATE articles
-        SET bias_type = (
-            SELECT feeds.bias_type
-            FROM feeds
-            WHERE feeds.url = articles.feed_url
+        conn.execute(
+            """
+            UPDATE articles
+            SET bias_type = (
+                SELECT feeds.bias_type
+                FROM feeds
+                WHERE feeds.url = articles.feed_url
+            )
+            WHERE bias_type IS NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM feeds
+                  WHERE feeds.url = articles.feed_url
+                    AND feeds.bias_type IS NOT NULL
+              )
+            """
         )
-        WHERE bias_type IS NULL
-          AND EXISTS (
-              SELECT 1
-              FROM feeds
-              WHERE feeds.url = articles.feed_url
-                AND feeds.bias_type IS NOT NULL
-          )
-        """
-    )
-    conn.commit()
 
 
 def now_iso() -> str:
@@ -478,6 +497,9 @@ def enqueue_article_job(conn, article_id: int) -> None:
 
     `article_id`에 UNIQUE 제약이 있으므로 같은 기사가 RSS 단계와 crawl 단계에서
     여러 번 ready가 되어도 큐에는 한 번만 들어간다.
+
+    자체 commit/transaction을 두지 않는 execute-only 헬퍼다. 기사 상태 UPDATE와
+    원자적으로 묶이도록 호출부의 `with conn.transaction():` 블록 안에서 호출한다.
     """
     now = now_iso()
     # 같은 기사가 여러 경로로 ready가 되어도 후속 처리 작업에는 한 번만 들어간다.

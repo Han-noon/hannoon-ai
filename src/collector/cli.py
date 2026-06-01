@@ -1,6 +1,8 @@
 import argparse
 import os
 
+from dotenv import load_dotenv
+
 from .crawler import crawl_articles
 from .rss import fetch_feed
 from .settings import (
@@ -60,6 +62,7 @@ def main() -> int:
     `fetch`만 실행할 때는 크롤링을 건너뛰고, `crawl`만 실행할 때는 이미 DB에
     저장된 `needs_crawl` 기사만 처리한다.
     """
+    load_dotenv()
     parser = build_parser()
     args = parser.parse_args()
     # 운영/테스트에서 명령을 생략해도 전체 파이프라인이 돌도록 기본값은 run으로 둔다.
@@ -76,10 +79,11 @@ def main() -> int:
             total = 0
             for feed_url in feed_urls:
                 # 피드는 서로 독립적으로 처리해 한 피드의 신규 건수만 로그에서 바로 확인할 수 있게 한다.
+                # 실패한 피드의 부분 쓰기는 fetch_feed의 transaction() 블록이 이미 롤백하므로,
+                # 여기서는 로그만 남기고 다음 피드로 넘어간다.
                 try:
                     count = fetch_feed(conn, feed_url, args.min_rss_len, offline=args.offline)
                 except Exception as exc:
-                    conn.rollback()
                     print(f"[warn] feed failed: {feed_url} ({exc})")
                     continue
                 print(f"[feed] {feed_url} -> {count} new items")
