@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
     "openai>=1.0.0",
     "python-dotenv>=1.0.0",
+    "sentence-transformers>=2.0.0",
 ]
 
 [tool.setuptools.packages.find]
