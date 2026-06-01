@@ -175,6 +175,9 @@ def run(conn) -> int:
                         f"LLM이 후보에 없는 topic_id={decision['topic_id']}를 반환했습니다."
                     )
 
+            # result 임베딩은 트랜잭션 밖에서 미리 계산해 점유 시간을 줄인다.
+            result_lit = to_vector_literal(embed(cr["result"]))
+
             # 5단계: 토픽 확정·매핑·cause 누적·체인 연결을 단일 트랜잭션으로
             with conn.transaction():
                 # 5-1. 토픽 확정
@@ -189,9 +192,7 @@ def run(conn) -> int:
                 # 5-2. 이벤트 ↔ 토픽 매핑 (배정 근거 reason 함께 기록)
                 events.assign_topic(conn, ev.id, topic_id, decision.get("reason"))
 
-                # 5-3. topic_causes 누적
-                # result를 임베딩해 cause_text(=result)로 저장한다(D4).
-                result_lit = to_vector_literal(embed(cr["result"]))
+                # 5-3. topic_causes 누적 (result를 cause_text로 저장한다, D4)
                 topic_causes.add_cause(conn, topic_id, cr["result"], result_lit)
 
                 # 5-4. 이벤트 체인 연결 (동일 토픽 내 시간순, linked-list 삽입)
