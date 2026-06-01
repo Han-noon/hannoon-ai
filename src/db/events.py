@@ -20,14 +20,14 @@ class Event:
 # ── SQL 상수 ────────────────────────────────────────────────────────────────
 
 # 미배정 이벤트 조회: topic_id가 null이고, 실제 기사 수((article_count - abusing_count))가
-# 임계값 이상인 이벤트를 created_at 오름차순으로 가져온다.
+# 임계값 이상인 이벤트를 (created_at, id) 기준 오름차순으로 가져온다.
 # 순서를 보장해야 prev/next 체인이 시간순으로 연결된다.
 FETCH_UNASSIGNED_SQL = """
 SELECT id, category, title, summary
 FROM events
 WHERE topic_id IS NULL
   AND (article_count - abusing_count) >= ?
-ORDER BY created_at ASC
+ORDER BY created_at ASC, id ASC
 LIMIT ?
 """
 
@@ -72,7 +72,7 @@ UPDATE_PREV_EVENT_SQL = "UPDATE events SET prev_event_id = ? WHERE id = ?"
 # ── Repository 함수 ─────────────────────────────────────────────────────────
 
 def fetch_unassigned(conn, min_net: int, batch_size: int) -> list[Event]:
-    """미배정 이벤트를 created_at ASC 순으로 최대 batch_size건 조회한다.
+    """미배정 이벤트를 (created_at, id) 기준 오름차순으로 최대 batch_size건 조회한다.
 
     min_net: (article_count - abusing_count) 최소값. 기준 미달 이벤트는 제외한다.
     """
