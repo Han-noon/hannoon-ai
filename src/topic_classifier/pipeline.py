@@ -133,7 +133,7 @@ def run(conn) -> int:
     processed = 0
     for ev in batch:
         try:
-            print(f"[topic] event {ev.id} 처리 중: {ev.title[:50]}")
+            print(f"[topic] event {ev.id} 처리 중: {ev.title}")
 
             # 2단계: 이벤트에서 원인(cause)과 결과(result) 추출
             print(f"[topic] event {ev.id} → cause/result 추출 중")
@@ -141,8 +141,8 @@ def run(conn) -> int:
                 build_topic_cause_result_prompt(ev.title, ev.summary),
                 required_keys={"cause", "result"},
             )
-            print(f"[topic] event {ev.id}  cause: {cr['cause'][:80]}")
-            print(f"[topic] event {ev.id}  result: {cr['result'][:80]}")
+            print(f"[topic] event {ev.id}  cause: {cr['cause']}")
+            print(f"[topic] event {ev.id}  result: {cr['result']}")
 
             # 3단계: 원인 임베딩으로 토픽 후보 검색
             print(f"[topic] event {ev.id} → 임베딩·후보 검색 중")
@@ -157,7 +157,7 @@ def run(conn) -> int:
                 required_keys={"action"},
             )
             print(f"[topic] event {ev.id}  action: {decision['action']}"
-                  + (f"  reason: {decision['reason'][:60]}" if decision.get("reason") else ""))
+                  + (f"  reason: {decision['reason']}" if decision.get("reason") else ""))
 
             # 5단계: 토픽 확정·매핑·cause 누적·체인 연결을 단일 트랜잭션으로
             with conn.transaction():
@@ -184,7 +184,7 @@ def run(conn) -> int:
                     events.link_chain(conn, prev_id, ev.id)
 
             processed += 1
-            action_label = "create" if decision["action"] == "create" else f"assign→{topic_id}"
+            action_label = "create" if decision["action"] == "create" else f"assign → {topic_id}"
             print(f"[topic] event {ev.id} → {action_label} ✓")
 
         except Exception as e:
