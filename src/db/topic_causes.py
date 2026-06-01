@@ -27,7 +27,6 @@ SEARCH_SQL = """
 SELECT t.id    AS topic_id,
        t.title AS topic_title,
        t.summary AS topic_summary,
-       tc.id   AS cause_id,
        tc.cause_text
 FROM topic_causes tc
 JOIN topics t ON t.id = tc.topic_id
@@ -39,7 +38,7 @@ LIMIT ?
 # 이벤트의 '결과(result)'를 topic_causes에 적재한다.
 # 컬럼명은 cause_text이지만, 여기에는 이벤트 result를 저장한다.
 # 이는 "해당 토픽에서 발생한 결과가 향후 유사 사건의 원인으로 작용한다"는
-# 모델링 가정을 반영한 것이다(topic_classfication_logic.md §관련 테이블 참고).
+# 모델링 가정을 반영한 것이다(docs/topic_classification_overview.md 참고).
 INSERT_CAUSE_SQL = """
 INSERT INTO topic_causes (topic_id, cause_text, cause_embedding)
 VALUES (?, ?, ?::vector)

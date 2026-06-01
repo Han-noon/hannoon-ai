@@ -1,6 +1,6 @@
 """토픽 분류 파이프라인 설정 상수.
 
-n, BATCH_SIZE, TOP_K는 임의 초기값이므로 운영 중 조정이 필요할 수 있다.
+MIN_NET_ARTICLE_COUNT, BATCH_SIZE, TOP_K는 임의 초기값이므로 운영 중 조정이 필요할 수 있다.
 """
 
 # (article_count - abusing_count) 최소값.
