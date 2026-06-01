@@ -79,15 +79,17 @@ def crawl_articles(conn, min_crawl_len: int, offline: bool, domain_delay: float)
 
         if text and len(text) >= min_crawl_len:
             # 충분한 본문을 확보한 기사만 후속 AI 처리 큐로 넘긴다.
-            conn.execute(
-                """
-                UPDATE articles
-                SET content = ?, content_source = ?, status = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (text, "crawl", "ready", now_iso(), article_id),
-            )
-            enqueue_article_job(conn, article_id)
+            # 상태 UPDATE와 큐 INSERT를 한 트랜잭션으로 묶어 기사 단위로 원자적으로 커밋한다.
+            with conn.transaction():
+                conn.execute(
+                    """
+                    UPDATE articles
+                    SET content = ?, content_source = ?, status = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (text, "crawl", "ready", now_iso(), article_id),
+                )
+                enqueue_article_job(conn, article_id)
             print(f"[crawl] {link} -> ready ({len(text)} chars)")
             updated += 1
         else:
@@ -99,6 +101,5 @@ def crawl_articles(conn, min_crawl_len: int, offline: bool, domain_delay: float)
                 ("crawl_failed", now_iso(), article_id),
             )
 
-    conn.commit()
     return updated
 

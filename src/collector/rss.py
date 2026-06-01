@@ -56,7 +56,6 @@ def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
             "UPDATE feeds SET last_checked = ? WHERE url = ?",
             (now_iso(), feed_url),
         )
-        conn.commit()
         return 0
     if getattr(parsed, "bozo", False):
         print(f"[warn] feed parse issue: {feed_url}")
@@ -66,87 +65,90 @@ def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
     category = infer_feed_category(feed_url, parsed_feed_title)
     publisher, bias_type = infer_publisher_metadata(feed_url, parsed_feed_title)
     feed_title = parsed_feed_title or feed_url
-    conn.execute(
-        """
-        INSERT INTO feeds (url, category, publisher, bias_type, title, etag, modified_at, last_checked)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(url) DO UPDATE SET
-            category = excluded.category,
-            publisher = excluded.publisher,
-            bias_type = excluded.bias_type,
-            title = excluded.title,
-            etag = excluded.etag,
-            modified_at = excluded.modified_at,
-            last_checked = excluded.last_checked
-        """,
-        (
-            feed_url,
-            category,
-            publisher,
-            bias_type,
-            feed_title,
-            getattr(parsed, "etag", None),
-            encode_feed_modified(getattr(parsed, "modified", None)),
-            now_iso(),
-        ),
-    )
-
+    # 피드 메타(etag/modified 포함) 갱신과 기사 INSERT를 한 트랜잭션으로 묶는다.
+    # 중간 실패 시 etag만 앞서 갱신돼 다음 실행이 304로 신규 기사를 건너뛰는 유실을 막는다.
+    # 루프 안에는 네트워크 호출이 없어 idle-in-transaction 위험은 없다.
     inserted = 0
-    for entry in parsed.entries:
-        # GUID가 가장 안정적인 식별자이고, 없는 피드는 정규화된 링크를 대체 키로 쓴다.
-        guid = entry.get("id") or entry.get("guid")
-        link = resolve_entry_link(entry.get("link"), feed_url)
-        if not guid and not link:
-            continue
-
-        # DB UNIQUE 제약도 있지만, 사전에 건너뛰면 불필요한 예외/롤백 흐름을 피할 수 있다.
-        existing = None
-        if guid:
-            existing = conn.query_one("SELECT id FROM articles WHERE guid = ?", (guid,))
-        if not existing and link:
-            existing = conn.query_one("SELECT id FROM articles WHERE link = ?", (link,))
-        if existing:
-            continue
-
-        # RSS 본문이 URL만 담는 피드도 있어 HTML로 보이는 값만 텍스트화한다.
-        content_html = ""
-        if entry.get("content"):
-            content_html = entry.get("content")[0].get("value", "")
-        summary_html = entry.get("summary") or entry.get("description") or ""
-        content_text = html_to_text(content_html) or html_to_text(summary_html)
-
-        # RSS content/summary는 신뢰 불가능. 항상 크롤링하도록 수정
-        status = "needs_crawl" if link else "crawl_failed"
-        # content_source는 NOT NULL이라 RSS 단계에서는 항상 'rss'로 두고, 크롤 성공 시 'crawl'로 갱신한다.
-        content_source = "rss"
-
-        # 원본 HTML 대신 정규화된 텍스트를 저장해 후속 AI 처리 입력을 단순화한다.
+    with conn.transaction():
         conn.execute(
             """
-            INSERT INTO articles (
-                feed_url, guid, link, category, title, publisher, bias_type, published_at, summary, content,
-                content_source, status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO feeds (url, category, publisher, bias_type, title, etag, modified_at, last_checked)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(url) DO UPDATE SET
+                category = excluded.category,
+                publisher = excluded.publisher,
+                bias_type = excluded.bias_type,
+                title = excluded.title,
+                etag = excluded.etag,
+                modified_at = excluded.modified_at,
+                last_checked = excluded.last_checked
             """,
             (
                 feed_url,
-                guid,
-                link,
                 category,
-                entry.get("title") or "(제목 없음)",
                 publisher,
                 bias_type,
-                # published_at은 NOT NULL이라 RSS에 날짜가 없으면 수집 시각으로 대체한다.
-                normalize_published(entry.get("published") or entry.get("updated")) or now_iso(),
-                html_to_text(summary_html),
-                content_text,
-                content_source,
-                status,
-                now_iso(),
+                feed_title,
+                getattr(parsed, "etag", None),
+                encode_feed_modified(getattr(parsed, "modified", None)),
                 now_iso(),
             ),
         )
-        inserted += 1
 
-    conn.commit()
+        for entry in parsed.entries:
+            # GUID가 가장 안정적인 식별자이고, 없는 피드는 정규화된 링크를 대체 키로 쓴다.
+            guid = entry.get("id") or entry.get("guid")
+            link = resolve_entry_link(entry.get("link"), feed_url)
+            if not guid and not link:
+                continue
+
+            # DB UNIQUE 제약도 있지만, 사전에 건너뛰면 불필요한 예외/롤백 흐름을 피할 수 있다.
+            existing = None
+            if guid:
+                existing = conn.query_one("SELECT id FROM articles WHERE guid = ?", (guid,))
+            if not existing and link:
+                existing = conn.query_one("SELECT id FROM articles WHERE link = ?", (link,))
+            if existing:
+                continue
+
+            # RSS 본문이 URL만 담는 피드도 있어 HTML로 보이는 값만 텍스트화한다.
+            content_html = ""
+            if entry.get("content"):
+                content_html = entry.get("content")[0].get("value", "")
+            summary_html = entry.get("summary") or entry.get("description") or ""
+            content_text = html_to_text(content_html) or html_to_text(summary_html)
+
+            # RSS content/summary는 신뢰 불가능. 항상 크롤링하도록 수정
+            status = "needs_crawl" if link else "crawl_failed"
+            # content_source는 NOT NULL이라 RSS 단계에서는 항상 'rss'로 두고, 크롤 성공 시 'crawl'로 갱신한다.
+            content_source = "rss"
+
+            # 원본 HTML 대신 정규화된 텍스트를 저장해 후속 AI 처리 입력을 단순화한다.
+            conn.execute(
+                """
+                INSERT INTO articles (
+                    feed_url, guid, link, category, title, publisher, bias_type, published_at, summary, content,
+                    content_source, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    feed_url,
+                    guid,
+                    link,
+                    category,
+                    entry.get("title") or "(제목 없음)",
+                    publisher,
+                    bias_type,
+                    # published_at은 NOT NULL이라 RSS에 날짜가 없으면 수집 시각으로 대체한다.
+                    normalize_published(entry.get("published") or entry.get("updated")) or now_iso(),
+                    html_to_text(summary_html),
+                    content_text,
+                    content_source,
+                    status,
+                    now_iso(),
+                    now_iso(),
+                ),
+            )
+            inserted += 1
+
     return inserted
