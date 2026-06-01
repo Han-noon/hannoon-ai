@@ -1,6 +1,8 @@
 import argparse
 import os
 
+from dotenv import load_dotenv
+
 from .crawler import crawl_articles
 from .rss import fetch_feed
 from .settings import (
@@ -60,6 +62,7 @@ def main() -> int:
     `fetch`만 실행할 때는 크롤링을 건너뛰고, `crawl`만 실행할 때는 이미 DB에
     저장된 `needs_crawl` 기사만 처리한다.
     """
+    load_dotenv()
     parser = build_parser()
     args = parser.parse_args()
     # 운영/테스트에서 명령을 생략해도 전체 파이프라인이 돌도록 기본값은 run으로 둔다.
