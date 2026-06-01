@@ -4,7 +4,8 @@ from urllib.request import url2pathname
 
 import requests
 
-from .settings import USER_AGENT
+from .content_cleaner import should_llm_cleanup
+from .settings import DEFAULT_CRAWL_BATCH_SIZE, USER_AGENT
 from .storage import enqueue_article_job, now_iso
 from .utils import extract_article_text
 
@@ -36,7 +37,16 @@ def fetch_url_text(url: str, offline: bool) -> str | None:
     return extract_article_text(response.text)
 
 
-def crawl_articles(conn, min_crawl_len: int, offline: bool, domain_delay: float) -> int:
+def crawl_articles(
+    conn,
+    min_crawl_len: int,
+    offline: bool,
+    domain_delay: float,
+    crawl_batch_size: int = DEFAULT_CRAWL_BATCH_SIZE,
+    llm_cleanup: bool = False,
+    llm_cleanup_model: str | None = None,
+    text_cleaner=None,
+) -> int:
     """`needs_crawl` 상태의 기사 원문을 가져와 DB에 반영한다.
 
     크롤링 결과가 `min_crawl_len`보다 길면 실제 본문을 확보했다고 보고
@@ -44,8 +54,20 @@ def crawl_articles(conn, min_crawl_len: int, offline: bool, domain_delay: float)
     높으므로 `crawl_failed`로 남긴다. 개별 기사 실패는 전체 배치를 중단하지 않고
     다음 기사로 넘어간다.
     """
+    if crawl_batch_size <= 0:
+        raise ValueError("crawl_batch_size must be greater than 0.")
+
+    cleaner = text_cleaner
+
     rows = conn.query(
-        "SELECT id, link FROM articles WHERE status = 'needs_crawl' AND link IS NOT NULL"
+        """
+        SELECT id, link
+        FROM articles
+        WHERE status = 'needs_crawl' AND link IS NOT NULL
+        ORDER BY created_at ASC, id ASC
+        LIMIT ?
+        """,
+        (crawl_batch_size,),
     )
     last_hit: dict[str, float] = {}
     updated = 0
@@ -76,6 +98,25 @@ def crawl_articles(conn, min_crawl_len: int, offline: bool, domain_delay: float)
                 ("crawl_failed", now_iso(), article_id),
             )
             continue
+
+        if text and (llm_cleanup or cleaner is not None):
+            needs_cleanup, cleanup_reasons = should_llm_cleanup(text)
+            if needs_cleanup:
+                reason_text = "; ".join(cleanup_reasons)
+                print(f"[cleanup] {link} -> using LLM ({reason_text})")
+                try:
+                    if cleaner is None:
+                        from .content_cleaner import ArticleTextCleaner
+
+                        cleaner = ArticleTextCleaner(model=llm_cleanup_model)
+                    text = cleaner.clean(text)
+                except Exception as exc:
+                    print(f"[warn] cleanup failed: {link} ({exc})")
+                    conn.execute(
+                        "UPDATE articles SET status = ?, updated_at = ? WHERE id = ?",
+                        ("crawl_failed", now_iso(), article_id),
+                    )
+                    continue
 
         if text and len(text) >= min_crawl_len:
             # 충분한 본문을 확보한 기사만 후속 AI 처리 큐로 넘긴다.

@@ -49,6 +49,9 @@ python main.py --feed https://feeds.bbci.co.uk/news/rss.xml run
 - `--feed`: 추가 RSS 피드 URL 또는 로컬 피드 파일 경로입니다. 여러 번 지정할 수 있습니다.
 - `--min-rss-len`: RSS 본문이 이 길이보다 짧으면 원문 크롤링 대상으로 표시합니다.
 - `--min-crawl-len`: 크롤링한 본문을 유효한 기사 본문으로 인정할 최소 길이입니다.
+- `--crawl-batch-size`: 한 번의 `crawl`/`run` 실행에서 처리할 최대 기사 수입니다. 기본값은 `20`입니다.
+- `--llm-cleanup`: 크롤링한 본문이 광고/구독 유도/관련기사 문구 등으로 의심될 때만 LLM으로 정제합니다.
+- `--llm-cleanup-model`: `--llm-cleanup`에 사용할 OpenAI 모델입니다. 기본값은 `gpt-4.1-mini`입니다.
 - `--domain-delay`: 같은 도메인에 연속 요청할 때 기다릴 시간(초)입니다.
 - `--offline`: HTTP/HTTPS 요청을 건너뜁니다. 로컬 피드 파일 테스트에 사용할 수 있습니다.
 

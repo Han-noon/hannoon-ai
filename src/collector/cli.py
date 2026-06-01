@@ -6,9 +6,11 @@ from dotenv import load_dotenv
 from .crawler import crawl_articles
 from .rss import fetch_feed
 from .settings import (
+    DEFAULT_CRAWL_BATCH_SIZE,
     DEFAULT_DB,
     DEFAULT_DOMAIN_DELAY,
     DEFAULT_FEEDS_FILE,
+    DEFAULT_LLM_CLEANUP_MODEL,
     DEFAULT_MIN_CRAWL_LEN,
     DEFAULT_MIN_RSS_LEN,
 )
@@ -34,6 +36,9 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--feed", action="append", help="Extra feed URL or local file") # feed 여러 개 받기
     parser.add_argument("--min-rss-len", type=int, default=DEFAULT_MIN_RSS_LEN) # RSS 내용 최소 길이 제한
     parser.add_argument("--min-crawl-len", type=int, default=DEFAULT_MIN_CRAWL_LEN) # 크롤링 본문 최소 길이 제한
+    parser.add_argument("--crawl-batch-size", type=int, default=DEFAULT_CRAWL_BATCH_SIZE, help="Maximum articles to crawl per run")
+    parser.add_argument("--llm-cleanup", action="store_true", help="Use an LLM to remove ads and boilerplate from crawled text")
+    parser.add_argument("--llm-cleanup-model", default=DEFAULT_LLM_CLEANUP_MODEL, help="OpenAI model for --llm-cleanup")
     parser.add_argument("--domain-delay", type=float, default=DEFAULT_DOMAIN_DELAY) # 같은 사이트 요청 간격 (크롤링 속도 제한)
     parser.add_argument("--offline", action="store_true", help="Do not fetch http/https URLs")
 
@@ -73,6 +78,12 @@ def main() -> int:
         print("No feeds configured. Provide --feed or config/feeds.json")
         return 1
 
+    if args.crawl_batch_size <= 0:
+        print("--crawl-batch-size must be greater than 0")
+        return 1
+
+    text_cleaner = None
+
     # database_url이 있으면 Supabase/Postgres, 없으면 로컬 SQLite 연결을 만든다.
     with ensure_db(args.db, database_url=args.database_url) as conn:
         if command in {"fetch", "run"}:
@@ -97,6 +108,10 @@ def main() -> int:
                 min_crawl_len=args.min_crawl_len,
                 offline=args.offline,
                 domain_delay=args.domain_delay,
+                crawl_batch_size=args.crawl_batch_size,
+                llm_cleanup=args.llm_cleanup,
+                llm_cleanup_model=args.llm_cleanup_model,
+                text_cleaner=text_cleaner,
             )
             print(f"[done] Crawled items updated: {updated}")
 
