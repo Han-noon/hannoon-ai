@@ -36,8 +36,8 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--feed", action="append", help="Extra feed URL or local file") # feed 여러 개 받기
     parser.add_argument("--min-rss-len", type=int, default=DEFAULT_MIN_RSS_LEN) # RSS 내용 최소 길이 제한
     parser.add_argument("--min-crawl-len", type=int, default=DEFAULT_MIN_CRAWL_LEN) # 크롤링 본문 최소 길이 제한
-    parser.add_argument("--crawl-batch-size", type=int, default=DEFAULT_CRAWL_BATCH_SIZE, help="Maximum articles to crawl per run")
-    parser.add_argument("--llm-cleanup", action="store_true", help="Use an LLM to remove ads and boilerplate from crawled text")
+    parser.add_argument("--crawl-batch-size", type=int, default=DEFAULT_CRAWL_BATCH_SIZE, help="Number of articles to load per crawl batch")
+    parser.add_argument("--llm-cleanup", action="store_true", help="Use an LLM only for crawled text that looks noisy")
     parser.add_argument("--llm-cleanup-model", default=DEFAULT_LLM_CLEANUP_MODEL, help="OpenAI model for --llm-cleanup")
     parser.add_argument("--domain-delay", type=float, default=DEFAULT_DOMAIN_DELAY) # 같은 사이트 요청 간격 (크롤링 속도 제한)
     parser.add_argument("--offline", action="store_true", help="Do not fetch http/https URLs")
