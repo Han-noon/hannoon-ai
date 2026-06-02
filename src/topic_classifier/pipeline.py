@@ -48,7 +48,7 @@ def _validate_topic_schema(conn) -> None:
     """
     required = {
         "events": {
-            "id", "topic_id", "category", "title", "summary",
+            "id", "topic_id", "category", "title", "summary", "embedding_text",
             "article_count", "abusing_count", "created_at",
             "prev_event_id", "next_event_id", "reason",
         },
@@ -135,10 +135,10 @@ def run(conn) -> int:
         try:
             print(f"[topic] event {ev.id} 처리 중: {ev.title}")
 
-            # 2단계: 이벤트에서 원인(cause)과 결과(result) 추출
+            # 2단계: 대표 기사(embedding_text)에서 원인(cause)과 결과(result) 추출
             print(f"[topic] event {ev.id} → cause/result 추출 중")
             cr = _call_json(
-                build_topic_cause_result_prompt(ev.title, ev.summary),
+                build_topic_cause_result_prompt(ev.embedding_text),
                 required_keys={"cause", "result"},
             )
             print(f"[topic] event {ev.id}  cause: {cr['cause']}")

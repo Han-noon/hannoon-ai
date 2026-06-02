@@ -7,16 +7,15 @@
 from db.topic_causes import TopicCandidate
 
 
-def build_topic_cause_result_prompt(title: str, summary: str) -> str:
-    """이벤트 제목·요약에서 원인(cause)과 결과(result)를 추출하는 프롬프트를 생성한다.
+def build_topic_cause_result_prompt(event_text: str) -> str:
+    """이벤트 대표 기사(제목 + 첫 문단)에서 원인(cause)과 결과(result)를 추출하는 프롬프트를 생성한다.
 
     LLM 응답 형식: {"cause": "...", "result": "..."}
     """
     return f"""다음 뉴스 이벤트에서 핵심 '원인'과 '결과'를 각각 한 문장으로 추출하세요.
 
 [이벤트]
-제목: {title}
-요약: {summary}
+{event_text}
 
 [작성 규칙]
 - 각 문장은 "[주체·지역] + [핵심 행위/사건] + [대상]" 구조를 따른다.
