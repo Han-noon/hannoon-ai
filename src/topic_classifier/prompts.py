@@ -66,6 +66,38 @@ def build_topic_assignment_prompt(
 생성 시: {{"action": "create", "new_title": "<새 토픽 제목>", "reason": "신규 생성 근거"}}"""
 
 
+def build_topic_update_prompt(
+    old_title: str,
+    old_summary: str,
+    event_title: str,
+    event_summary: str,
+) -> str:
+    """기존 토픽의 제목·요약을 새로 배정된 이벤트를 반영해 최신화하는 프롬프트를 생성한다.
+
+    사건이 전개될수록 토픽 메타데이터가 초기 이벤트에 고정되지 않도록,
+    배정 시점의 최신 상황을 반영한 제목·요약을 재생성한다.
+
+    LLM 응답 형식: {"title": "...", "summary": "..."}
+    """
+    return f"""다음은 하나의 토픽(사건)과 그 토픽에 새로 배정된 이벤트입니다.
+새 이벤트가 반영된 현재 시점 기준으로 토픽의 제목과 요약을 갱신하세요.
+
+[현재 토픽]
+제목: {old_title}
+요약: {old_summary}
+
+[새로 배정된 이벤트]
+제목: {event_title}
+요약: {event_summary}
+
+[작성 규칙]
+- 제목은 '주체 + 핵심 사건' 형태로 간결하게 유지한다 (예: "삼성전자 노조 총파업").
+- 요약은 사건의 최신 전개까지 포함해 핵심 사실 위주로 작성한다.
+- 기존 토픽이 다루던 사건의 범위를 벗어나지 않는다(다른 사건을 끌어들이지 않는다).
+
+다음 JSON 형식으로만 응답하세요: {{"title": "...", "summary": "..."}}"""
+
+
 def _format_candidates(candidates: list[TopicCandidate]) -> str:
     """TopicCandidate 목록을 프롬프트에 삽입할 텍스트 블록으로 변환한다."""
     if not candidates:

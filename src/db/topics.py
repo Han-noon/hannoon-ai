@@ -27,6 +27,10 @@ VALUES (?::category, ?, ?)
 RETURNING id
 """
 
+# 기존 토픽의 제목·요약을 갱신한다.
+# updated_at은 DB 트리거가 처리하므로 여기서 다루지 않는다.
+UPDATE_TOPIC_SQL = "UPDATE topics SET title = ?, summary = ? WHERE id = ?"
+
 
 # ── Repository 함수 ─────────────────────────────────────────────────────────
 
@@ -34,3 +38,8 @@ def create_topic(conn, category: str, title: str, summary: str) -> int:
     """새 토픽을 생성하고 생성된 id를 반환한다. 트랜잭션 내에서 호출한다."""
     row = conn.query_one(INSERT_TOPIC_SQL, (category, title, summary))
     return row["id"]
+
+
+def update_topic(conn, topic_id: int, title: str, summary: str) -> None:
+    """기존 토픽의 제목·요약을 갱신한다. 트랜잭션 내에서 호출한다."""
+    conn.execute(UPDATE_TOPIC_SQL, (title, summary, topic_id))

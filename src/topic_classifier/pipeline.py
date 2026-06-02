@@ -19,6 +19,7 @@ from openai_client.client import OpenAIClient
 from topic_classifier.prompts import (
     build_topic_cause_result_prompt,
     build_topic_assignment_prompt,
+    build_topic_update_prompt,
 )
 from topic_classifier.settings import (
     BATCH_SIZE,
@@ -175,6 +176,20 @@ def run(conn) -> int:
                         f"LLM이 후보에 없는 topic_id={decision['topic_id']}를 반환했습니다."
                     )
 
+            # assign이면 배정 시점 기준으로 토픽 제목·요약을 최신화한다(LLM, 트랜잭션 밖).
+            # 현재 토픽 제목·요약은 후보 검색 결과에 이미 들어 있어 추가 조회가 필요 없다.
+            topic_update = None
+            if action == "assign":
+                chosen = next(
+                    c for c in candidates if c.topic_id == int(decision["topic_id"])
+                )
+                topic_update = _call_json(
+                    build_topic_update_prompt(
+                        chosen.title, chosen.summary, ev.title, ev.summary
+                    ),
+                    required_keys={"title", "summary"},
+                )
+
             # result 임베딩은 트랜잭션 밖에서 미리 계산해 점유 시간을 줄인다.
             result_lit = to_vector_literal(embed(cr["result"]))
 
@@ -188,6 +203,10 @@ def run(conn) -> int:
                     )
                 else:
                     topic_id = int(decision["topic_id"])
+                    # 5-1b. 기존 토픽 제목·요약을 최신 이벤트 기준으로 갱신
+                    topics.update_topic(
+                        conn, topic_id, topic_update["title"], topic_update["summary"]
+                    )
 
                 # 5-2. 이벤트 ↔ 토픽 매핑 (배정 근거 reason 함께 기록)
                 events.assign_topic(conn, ev.id, topic_id, decision.get("reason"))
