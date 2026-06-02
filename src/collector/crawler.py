@@ -79,19 +79,33 @@ def crawl_articles(
     cleaner = text_cleaner
     last_hit: dict[str, float] = {}
     updated = 0
+    batch_no = 0
+
+    print(
+        "[crawl] start "
+        f"(batch_size={crawl_batch_size}, min_crawl_len={min_crawl_len}, "
+        f"offline={offline}, llm_cleanup={llm_cleanup or cleaner is not None})"
+    )
 
     while True:
         rows = _load_crawl_batch(conn, crawl_batch_size)
         if not rows:
             break
 
+        batch_no += 1
+        batch_ready = 0
+        batch_failed = 0
+        batch_skipped = 0
         finished_in_batch = 0
+        print(f"[crawl-batch] {batch_no} -> loaded {len(rows)} pending items")
+
         for row in rows:
             article_id, link = row["id"], row["link"]
             parsed = urlparse(link)
             skipped_offline_http = offline and parsed.scheme in {"http", "https"}
             if skipped_offline_http:
-                print(f"[skip] offline mode: {link}")
+                print(f"[skip] crawl offline: article={article_id} link={link}")
+                batch_skipped += 1
                 continue
 
             if parsed.scheme in {"http", "https"}:
@@ -105,8 +119,9 @@ def crawl_articles(
             try:
                 text = fetch_url_text(link, offline=offline)
             except Exception as exc:
-                print(f"[warn] crawl failed: {link} ({exc})")
+                print(f"[warn] crawl failed: article={article_id} link={link} ({exc})")
                 _mark_crawl_failed(conn, article_id)
+                batch_failed += 1
                 finished_in_batch += 1
                 continue
 
@@ -114,16 +129,18 @@ def crawl_articles(
                 needs_cleanup, cleanup_reasons = should_llm_cleanup(text)
                 if needs_cleanup:
                     reason_text = "; ".join(cleanup_reasons)
-                    print(f"[cleanup] {link} -> using LLM ({reason_text})")
+                    print(f"[cleanup] article={article_id} link={link} -> using LLM ({reason_text})")
                     try:
                         if cleaner is None:
                             from .content_cleaner import ArticleTextCleaner
 
                             cleaner = ArticleTextCleaner(model=llm_cleanup_model)
                         text = cleaner.clean(text)
+                        print(f"[cleanup] article={article_id} link={link} -> done ({len(text)} chars)")
                     except Exception as exc:
-                        print(f"[warn] cleanup failed: {link} ({exc})")
+                        print(f"[warn] cleanup failed: article={article_id} link={link} ({exc})")
                         _mark_crawl_failed(conn, article_id)
+                        batch_failed += 1
                         finished_in_batch += 1
                         continue
 
@@ -138,17 +155,34 @@ def crawl_articles(
                         (text, "crawl", "ready", now_iso(), article_id),
                     )
                     enqueue_article_job(conn, article_id)
-                print(f"[crawl] {link} -> ready ({len(text)} chars)")
+                print(f"[crawl] article={article_id} link={link} -> ready ({len(text)} chars)")
                 updated += 1
+                batch_ready += 1
                 finished_in_batch += 1
             else:
                 text_len = len(text) if text else 0
-                print(f"[warn] crawl failed: {link} (content too short: {text_len} chars)")
+                print(
+                    "[warn] crawl failed: "
+                    f"article={article_id} link={link} "
+                    f"(content too short: {text_len} chars)"
+                )
                 _mark_crawl_failed(conn, article_id)
+                batch_failed += 1
                 finished_in_batch += 1
+
+        print(
+            f"[crawl-batch] {batch_no} -> "
+            f"ready={batch_ready}, failed={batch_failed}, "
+            f"skipped={batch_skipped}, total_ready={updated}"
+        )
 
         if finished_in_batch == 0:
             break
+
+    if batch_no == 0:
+        print("[crawl] no articles need crawling")
+    else:
+        print(f"[crawl] completed -> ready={updated}, batches={batch_no}")
 
     return updated
 
