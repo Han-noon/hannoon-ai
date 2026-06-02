@@ -6,6 +6,10 @@ from dotenv import load_dotenv
 from .crawler import crawl_articles
 from .rss import fetch_feed
 from .settings import (
+    DEFAULT_ABUSE_P1_MODEL_DIR,
+    DEFAULT_ABUSE_P2_MODEL_DIR,
+    DEFAULT_CLASSIFY_BATCH_SIZE,
+    DEFAULT_CLASSIFY_MAX_ATTEMPTS,
     DEFAULT_CRAWL_BATCH_SIZE,
     DEFAULT_DB,
     DEFAULT_DOMAIN_DELAY,
@@ -32,14 +36,47 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         default=os.environ.get("DATABASE_URL"),
         help="Postgres/Supabase database URL. Defaults to DATABASE_URL env var.",
     )
-    parser.add_argument("--feeds-file", default=DEFAULT_FEEDS_FILE, help="JSON file of feed URLs") # JSON 파일로 RSS 목록 받기
-    parser.add_argument("--feed", action="append", help="Extra feed URL or local file") # feed 여러 개 받기
-    parser.add_argument("--min-rss-len", type=int, default=DEFAULT_MIN_RSS_LEN) # RSS 내용 최소 길이 제한
-    parser.add_argument("--min-crawl-len", type=int, default=DEFAULT_MIN_CRAWL_LEN) # 크롤링 본문 최소 길이 제한
-    parser.add_argument("--crawl-batch-size", type=int, default=DEFAULT_CRAWL_BATCH_SIZE, help="Number of articles to load per crawl batch")
+    parser.add_argument("--feeds-file", default=DEFAULT_FEEDS_FILE, help="JSON file of feed URLs")
+    parser.add_argument("--feed", action="append", help="Extra feed URL or local file")
+    parser.add_argument("--min-rss-len", type=int, default=DEFAULT_MIN_RSS_LEN)
+    parser.add_argument("--min-crawl-len", type=int, default=DEFAULT_MIN_CRAWL_LEN)
+    parser.add_argument(
+        "--crawl-batch-size",
+        type=int,
+        default=DEFAULT_CRAWL_BATCH_SIZE,
+        help="Number of articles to load per crawl batch",
+    )
+    parser.add_argument(
+        "--classify-batch-size",
+        type=int,
+        default=DEFAULT_CLASSIFY_BATCH_SIZE,
+        help="Number of pending articles to classify per batch",
+    )
+    parser.add_argument(
+        "--classify-max-attempts",
+        type=int,
+        default=DEFAULT_CLASSIFY_MAX_ATTEMPTS,
+        help="Maximum classification attempts before marking a job failed",
+    )
+    parser.add_argument(
+        "--classify-after-crawl",
+        action="store_true",
+        help="Run abuse classification after crawl when command is run",
+    )
+    parser.add_argument(
+        "--abuse-p1-model-dir",
+        default=os.environ.get("ABUSE_P1_MODEL_DIR", DEFAULT_ABUSE_P1_MODEL_DIR),
+        help="Path to p1 clickbait model directory",
+    )
+    parser.add_argument(
+        "--abuse-p2-model-dir",
+        default=os.environ.get("ABUSE_P2_MODEL_DIR", DEFAULT_ABUSE_P2_MODEL_DIR),
+        help="Path to p2 topic mismatch model directory",
+    )
+    parser.add_argument("--abuse-device", default="auto", help="Inference device: auto, cpu, cuda, cuda:0, etc.")
     parser.add_argument("--llm-cleanup", action="store_true", help="Use an LLM only for crawled text that looks noisy")
     parser.add_argument("--llm-cleanup-model", default=DEFAULT_LLM_CLEANUP_MODEL, help="OpenAI model for --llm-cleanup")
-    parser.add_argument("--domain-delay", type=float, default=DEFAULT_DOMAIN_DELAY) # 같은 사이트 요청 간격 (크롤링 속도 제한)
+    parser.add_argument("--domain-delay", type=float, default=DEFAULT_DOMAIN_DELAY)
     parser.add_argument("--offline", action="store_true", help="Do not fetch http/https URLs")
 
 
@@ -54,9 +91,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_args(parser)
 
     subparsers = parser.add_subparsers(dest="command")
-    subparsers.add_parser("fetch", help="Fetch RSS items only") # RSS만 가져옴
-    subparsers.add_parser("crawl", help="Crawl items that need full text") # 본문 크롤링만 수행
-    subparsers.add_parser("run", help="Fetch RSS and crawl missing text") # 둘 다 수행 (통합 실행)
+    subparsers.add_parser("fetch", help="Fetch RSS items only")
+    subparsers.add_parser("crawl", help="Crawl items that need full text")
+    subparsers.add_parser("classify", help="Classify ready articles for abuse")
+    subparsers.add_parser("run", help="Fetch RSS and crawl missing text")
     return parser
 
 
@@ -80,6 +118,12 @@ def main() -> int:
 
     if args.crawl_batch_size <= 0:
         print("--crawl-batch-size must be greater than 0")
+        return 1
+    if args.classify_batch_size <= 0:
+        print("--classify-batch-size must be greater than 0")
+        return 1
+    if args.classify_max_attempts <= 0:
+        print("--classify-max-attempts must be greater than 0")
         return 1
 
     text_cleaner = None
@@ -115,5 +159,17 @@ def main() -> int:
             )
             print(f"[done] Crawled items updated: {updated}")
 
-    return 0
+        if command == "classify" or (command == "run" and args.classify_after_crawl):
+            from .ai_worker import classify_pending_articles
 
+            classified = classify_pending_articles(
+                conn,
+                p1_model_dir=args.abuse_p1_model_dir,
+                p2_model_dir=args.abuse_p2_model_dir,
+                batch_size=args.classify_batch_size,
+                device=args.abuse_device,
+                max_attempts=args.classify_max_attempts,
+            )
+            print(f"[done] Classified items: {classified}")
+
+    return 0
