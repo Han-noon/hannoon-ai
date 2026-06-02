@@ -109,3 +109,23 @@ Supabase/Postgres에서 필요한 테이블이나 컬럼이 없으면 앱은 DDL
 - `attempts`: 후속 처리 시도 횟수입니다.
 - `last_error`: 마지막 실패 메시지입니다.
 - `last_attempt_at`: 마지막 후속 처리 시각입니다.
+
+## 어뷰징 기사 분류 작업
+
+크롤링으로 본문이 준비된 기사(`ready`)를 `article_jobs` 큐에서 가져와 어뷰징 여부를 분류합니다.
+
+- `models/clickbait-classifier`: 낚시성 기사 분류 모델
+- `models/topic-mismatch-detector`: 본문 주제분리 탐지 모델
+- 두 모델 중 하나라도 `abuse`면 최종 `abuse`, 둘 다 `normal`이면 최종 `normal`
+- `--classify-batch-size`는 전체 개수 제한이 아니라 한 번에 처리할 배치 크기입니다. 기본값은 `20`입니다.
+- `article_ai_results`에서는 `abuse_score`, `abuse_label`만 저장/수정합니다.
+- 분류 후 `article_jobs`는 `pending`으로 유지해 다음 AI 요약 단계가 처리하도록 둡니다.
+
+실행:
+
+```bash
+python main.py classify
+python main.py --classify-after-crawl run
+```
+
+모델 weight는 Git에 올리지 않고 `models/` 아래에 별도로 배치합니다.
