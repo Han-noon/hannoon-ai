@@ -213,6 +213,10 @@ def run(conn) -> int:
 
                 # 5-3. topic_causes 누적 (result를 cause_text로 저장한다, D4)
                 topic_causes.add_cause(conn, topic_id, cr["result"], result_lit)
+                # 신규 토픽은 최초 이벤트의 cause가 발단이 되므로, 이후 유사 이벤트가
+                # 검색으로 이 토픽을 찾을 수 있도록 cause도 함께 적재한다.
+                if action == "create":
+                    topic_causes.add_cause(conn, topic_id, cr["cause"], cause_lit)
 
                 # 5-4. 이벤트 체인 연결 (동일 토픽 내 시간순, linked-list 삽입)
                 prev = events.find_prev_event(conn, topic_id, ev.id)
