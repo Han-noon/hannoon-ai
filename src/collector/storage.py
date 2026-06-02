@@ -556,38 +556,26 @@ def save_article_ai_result(
     abuse_label: str,
 ) -> None:
     """article_ai_results에서 어뷰징 관련 필드만 저장한다."""
-    existing = conn.query_one(
-        "SELECT id FROM article_ai_results WHERE article_id = ?",
-        (article_id,),
-    )
-    if existing:
-        conn.execute(
-            """
-            UPDATE article_ai_results
-            SET abuse_score = ?,
-                abuse_label = ?
-            WHERE id = ?
-            """,
-            (
-                abuse_score,
-                abuse_label,
-                existing["id"],
-            ),
-        )
-        return
-
+    now = now_iso()
     conn.execute(
         """
         INSERT INTO article_ai_results (
             article_id,
             abuse_score,
-            abuse_label
-        ) VALUES (?, ?, ?)
+            abuse_label,
+            created_at,
+            updated_at
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(article_id) DO UPDATE SET
+            abuse_score = excluded.abuse_score,
+            abuse_label = excluded.abuse_label
         """,
         (
             article_id,
             abuse_score,
             abuse_label,
+            now,
+            now,
         ),
     )
 
