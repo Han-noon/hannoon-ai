@@ -229,6 +229,10 @@ def run(conn) -> int:
             processed += 1
             action_label = "create" if decision["action"] == "create" else f"assign → {topic_id}"
             print(f"[topic] event {ev.id} → {action_label} ✓")
+            if action == "assign":
+                print(f"[topic] title: {chosen.title!r} → {topic_update['title']!r}")
+                print(f"[topic] summary: {chosen.summary!r} → {topic_update['summary']!r}")
+            print()
 
         except Exception as e:
             # 순서 보장을 위해 배치를 중단한다(D2).
