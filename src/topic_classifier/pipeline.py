@@ -6,13 +6,8 @@
 """
 
 import json
-import os
 import sys
 
-from dotenv import load_dotenv
-
-from collector.settings import DEFAULT_DB
-from collector.storage import ensure_db
 from db import events, topics, topic_causes
 from embedding import embed, to_vector_literal
 from openai_client.client import OpenAIClient
@@ -21,21 +16,17 @@ from topic_classifier.prompts import (
     build_topic_assignment_prompt,
     build_topic_update_prompt,
 )
-from topic_classifier.settings import (
-    BATCH_SIZE,
-    LLM_MODEL,
-    MIN_NET_ARTICLE_COUNT,
-    TOP_K,
-)
+from topic_classifier.settings import LLM_MODEL
 
-# LLM 클라이언트는 모듈 로드 시 1회 초기화된다.
+# LLM 클라이언트는 첫 호출 시 1회 생성되는 싱글톤이다.
+# run()이 시작 시 CLI 모델로 초기화하며, 미지정 시 settings.LLM_MODEL을 쓴다.
 _client: OpenAIClient | None = None
 
 
-def _get_client() -> OpenAIClient:
+def _get_client(model: str = LLM_MODEL) -> OpenAIClient:
     global _client
     if _client is None:
-        _client = OpenAIClient(model=LLM_MODEL)
+        _client = OpenAIClient(model=model)
     return _client
 
 
@@ -116,7 +107,7 @@ def _call_json(prompt: str, required_keys: set[str]) -> dict:
 
 # ── 파이프라인 ────────────────────────────────────────────────────────────────
 
-def run(conn) -> int:
+def run(conn, min_net: int, batch_size: int, top_k: int, llm_model: str) -> int:
     """미배정 이벤트 배치를 처리하고 처리된 이벤트 수를 반환한다.
 
     처리 순서(created_at ASC)를 반드시 지킨다.
@@ -124,8 +115,16 @@ def run(conn) -> int:
 
     한 이벤트에서 오류가 발생하면 이후 이벤트를 건너뛰지 않고 배치를 중단한다.
     미처리 이벤트는 topic_id IS NULL로 남아 다음 실행에서 같은 순서로 재시도된다.
+
+    min_net: 실제 기사 수((article_count - abusing_count)) 최소값.
+    batch_size: 한 번에 처리할 최대 이벤트 수.
+    top_k: 토픽 후보 검색 수.
+    llm_model: cause/result 추출·배정·최신화에 사용할 LLM 모델.
     """
-    batch = events.fetch_unassigned(conn, MIN_NET_ARTICLE_COUNT, BATCH_SIZE)
+    _get_client(llm_model)
+    _validate_topic_schema(conn)
+
+    batch = events.fetch_unassigned(conn, min_net, batch_size)
     if not batch:
         print("[topic] 미배정 이벤트 없음")
         return 0
@@ -148,7 +147,7 @@ def run(conn) -> int:
             # 3단계: 원인 임베딩으로 토픽 후보 검색
             print(f"[topic] event {ev.id} → 임베딩·후보 검색 중")
             cause_lit = to_vector_literal(embed(cr["cause"]))
-            candidates = topic_causes.search_candidates(conn, cause_lit, TOP_K)
+            candidates = topic_causes.search_candidates(conn, cause_lit, top_k)
             print(f"[topic] event {ev.id}  후보 {len(candidates)}건")
 
             # 4단계: LLM으로 토픽 배정 여부 결정
@@ -241,25 +240,3 @@ def run(conn) -> int:
             break
 
     return processed
-
-
-# ── 진입점 ────────────────────────────────────────────────────────────────────
-
-def main() -> int:
-    load_dotenv()
-
-    database_url = os.environ.get("DATABASE_URL")
-    if not database_url:
-        print(
-            "[topic] DATABASE_URL 환경변수가 설정되지 않았습니다.\n"
-            "토픽 분류는 pgvector가 필요하므로 Postgres 연결이 필수입니다.",
-            file=sys.stderr,
-        )
-        return 1
-
-    with ensure_db(DEFAULT_DB, database_url=database_url) as conn:
-        _validate_topic_schema(conn)
-        count = run(conn)
-        print(f"[done] 토픽 배정 완료: {count}건")
-
-    return 0
