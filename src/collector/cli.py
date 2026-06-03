@@ -6,11 +6,25 @@ from dotenv import load_dotenv
 from .crawler import crawl_articles
 from .rss import fetch_feed
 from .settings import (
+    DEFAULT_AI_BATCH_SIZE,
+    DEFAULT_ABUSE_P1_MODEL_DIR,
+    DEFAULT_ABUSE_P2_MODEL_DIR,
+    DEFAULT_CLASSIFY_MAX_ATTEMPTS,
+    DEFAULT_CRAWL_BATCH_SIZE,
     DEFAULT_DB,
     DEFAULT_DOMAIN_DELAY,
     DEFAULT_FEEDS_FILE,
+    DEFAULT_LLM_CLEANUP_MODEL,
     DEFAULT_MIN_CRAWL_LEN,
     DEFAULT_MIN_RSS_LEN,
+    DEFAULT_SUMMARY_HEAD_CANDIDATES,
+    DEFAULT_SUMMARY_MAX_ATTEMPTS,
+    DEFAULT_SUMMARY_MAX_CANDIDATES,
+    DEFAULT_SUMMARY_MIDDLE_CANDIDATES,
+    DEFAULT_SUMMARY_MODEL_PATH,
+    DEFAULT_SUMMARY_SENTENCES,
+    DEFAULT_SUMMARY_TAIL_CANDIDATES,
+    DEFAULT_SUMMARY_TOKENIZER_DIR,
 )
 from .storage import backfill_article_categories, ensure_db
 from .utils import load_feed_urls
@@ -30,11 +44,89 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         default=os.environ.get("DATABASE_URL"),
         help="Postgres/Supabase database URL. Defaults to DATABASE_URL env var.",
     )
-    parser.add_argument("--feeds-file", default=DEFAULT_FEEDS_FILE, help="JSON file of feed URLs") # JSON 파일로 RSS 목록 받기
-    parser.add_argument("--feed", action="append", help="Extra feed URL or local file") # feed 여러 개 받기
-    parser.add_argument("--min-rss-len", type=int, default=DEFAULT_MIN_RSS_LEN) # RSS 내용 최소 길이 제한
-    parser.add_argument("--min-crawl-len", type=int, default=DEFAULT_MIN_CRAWL_LEN) # 크롤링 본문 최소 길이 제한
-    parser.add_argument("--domain-delay", type=float, default=DEFAULT_DOMAIN_DELAY) # 같은 사이트 요청 간격 (크롤링 속도 제한)
+    parser.add_argument("--feeds-file", default=DEFAULT_FEEDS_FILE, help="JSON file of feed URLs")
+    parser.add_argument("--feed", action="append", help="Extra feed URL or local file")
+    parser.add_argument("--min-rss-len", type=int, default=DEFAULT_MIN_RSS_LEN)
+    parser.add_argument("--min-crawl-len", type=int, default=DEFAULT_MIN_CRAWL_LEN)
+    parser.add_argument(
+        "--crawl-batch-size",
+        type=int,
+        default=DEFAULT_CRAWL_BATCH_SIZE,
+        help="Number of articles to load per crawl batch",
+    )
+    parser.add_argument(
+        "--ai-batch-size",
+        type=int,
+        default=DEFAULT_AI_BATCH_SIZE,
+        help="Number of pending articles to load per AI pipeline batch",
+    )
+    parser.add_argument(
+        "--classify-max-attempts",
+        type=int,
+        default=DEFAULT_CLASSIFY_MAX_ATTEMPTS,
+        help="Maximum classification attempts before marking a job failed",
+    )
+    parser.add_argument(
+        "--abuse-p1-model-dir",
+        default=os.environ.get("ABUSE_P1_MODEL_DIR", DEFAULT_ABUSE_P1_MODEL_DIR),
+        help="Path to p1 clickbait model directory",
+    )
+    parser.add_argument(
+        "--abuse-p2-model-dir",
+        default=os.environ.get("ABUSE_P2_MODEL_DIR", DEFAULT_ABUSE_P2_MODEL_DIR),
+        help="Path to p2 topic mismatch model directory",
+    )
+    parser.add_argument("--abuse-device", default="auto", help="Inference device: auto, cpu, cuda, cuda:0, etc.")
+    parser.add_argument(
+        "--summary-model-path",
+        default=os.environ.get("SUMMARY_MODEL_PATH", DEFAULT_SUMMARY_MODEL_PATH),
+        help="Path to BERT extractive summary model checkpoint",
+    )
+    parser.add_argument(
+        "--summary-tokenizer-dir",
+        default=os.environ.get("SUMMARY_TOKENIZER_DIR", DEFAULT_SUMMARY_TOKENIZER_DIR),
+        help="Path to KLUE BERT tokenizer/config directory",
+    )
+    parser.add_argument("--summary-device", default="auto", help="Summary inference device: auto, cpu, cuda, etc.")
+    parser.add_argument(
+        "--summary-max-attempts",
+        type=int,
+        default=DEFAULT_SUMMARY_MAX_ATTEMPTS,
+        help="Maximum summary attempts before marking a job failed",
+    )
+    parser.add_argument(
+        "--summary-sentences",
+        type=int,
+        default=int(os.environ.get("SUMMARY_SENTENCES", DEFAULT_SUMMARY_SENTENCES)),
+        help="Number of sentences to keep in extractive summary",
+    )
+    parser.add_argument(
+        "--summary-max-candidates",
+        type=int,
+        default=int(os.environ.get("SUMMARY_MAX_CANDIDATES", DEFAULT_SUMMARY_MAX_CANDIDATES)),
+        help="Maximum sentence candidates to score per article",
+    )
+    parser.add_argument(
+        "--summary-head-candidates",
+        type=int,
+        default=int(os.environ.get("SUMMARY_HEAD_CANDIDATES", DEFAULT_SUMMARY_HEAD_CANDIDATES)),
+        help="Number of leading sentence candidates to score per article",
+    )
+    parser.add_argument(
+        "--summary-middle-candidates",
+        type=int,
+        default=int(os.environ.get("SUMMARY_MIDDLE_CANDIDATES", DEFAULT_SUMMARY_MIDDLE_CANDIDATES)),
+        help="Number of middle sentence candidates to score per article",
+    )
+    parser.add_argument(
+        "--summary-tail-candidates",
+        type=int,
+        default=int(os.environ.get("SUMMARY_TAIL_CANDIDATES", DEFAULT_SUMMARY_TAIL_CANDIDATES)),
+        help="Number of trailing sentence candidates to score per article",
+    )
+    parser.add_argument("--llm-cleanup", action="store_true", help="Use an LLM only for crawled text that looks noisy")
+    parser.add_argument("--llm-cleanup-model", default=DEFAULT_LLM_CLEANUP_MODEL, help="OpenAI model for --llm-cleanup")
+    parser.add_argument("--domain-delay", type=float, default=DEFAULT_DOMAIN_DELAY)
     parser.add_argument("--offline", action="store_true", help="Do not fetch http/https URLs")
 
 
@@ -45,13 +137,14 @@ def build_parser() -> argparse.ArgumentParser:
     - crawl: RSS 단계에서 본문이 짧다고 판단된 기사만 원문 크롤링한다.
     - run: fetch 후 crawl까지 이어서 실행한다.
     """
-    parser = argparse.ArgumentParser(description="RSS -> crawl collector")
+    parser = argparse.ArgumentParser(description="RSS -> crawl -> classify -> summarize collector")
     add_common_args(parser)
 
     subparsers = parser.add_subparsers(dest="command")
-    subparsers.add_parser("fetch", help="Fetch RSS items only") # RSS만 가져옴
-    subparsers.add_parser("crawl", help="Crawl items that need full text") # 본문 크롤링만 수행
-    subparsers.add_parser("run", help="Fetch RSS and crawl missing text") # 둘 다 수행 (통합 실행)
+    subparsers.add_parser("fetch", help="Fetch RSS items only")
+    subparsers.add_parser("crawl", help="Crawl items that need full text")
+    subparsers.add_parser("process", help="Classify and summarize ready articles")
+    subparsers.add_parser("run", help="Fetch RSS, crawl, classify, and summarize")
     return parser
 
 
@@ -72,6 +165,47 @@ def main() -> int:
     if command in {"fetch", "run"} and not feed_urls:
         print("No feeds configured. Provide --feed or config/feeds.json")
         return 1
+
+    if args.crawl_batch_size <= 0:
+        print("--crawl-batch-size must be greater than 0")
+        return 1
+    if args.ai_batch_size <= 0:
+        print("--ai-batch-size must be greater than 0")
+        return 1
+    if args.classify_max_attempts <= 0:
+        print("--classify-max-attempts must be greater than 0")
+        return 1
+    if args.summary_max_attempts <= 0:
+        print("--summary-max-attempts must be greater than 0")
+        return 1
+    if args.summary_sentences <= 0:
+        print("--summary-sentences must be greater than 0")
+        return 1
+    if args.summary_max_candidates <= 0:
+        print("--summary-max-candidates must be greater than 0")
+        return 1
+    if args.summary_head_candidates < 0:
+        print("--summary-head-candidates must be greater than or equal to 0")
+        return 1
+    if args.summary_middle_candidates < 0:
+        print("--summary-middle-candidates must be greater than or equal to 0")
+        return 1
+    if args.summary_tail_candidates < 0:
+        print("--summary-tail-candidates must be greater than or equal to 0")
+        return 1
+    summary_candidate_total = (
+        args.summary_head_candidates
+        + args.summary_middle_candidates
+        + args.summary_tail_candidates
+    )
+    if summary_candidate_total <= 0:
+        print("At least one summary candidate count must be greater than 0")
+        return 1
+    if summary_candidate_total > args.summary_max_candidates:
+        print("summary head/middle/tail candidates must not exceed --summary-max-candidates")
+        return 1
+
+    text_cleaner = None
 
     # database_url이 있으면 Supabase/Postgres, 없으면 로컬 SQLite 연결을 만든다.
     with ensure_db(args.db, database_url=args.database_url) as conn:
@@ -97,8 +231,33 @@ def main() -> int:
                 min_crawl_len=args.min_crawl_len,
                 offline=args.offline,
                 domain_delay=args.domain_delay,
+                crawl_batch_size=args.crawl_batch_size,
+                llm_cleanup=args.llm_cleanup,
+                llm_cleanup_model=args.llm_cleanup_model,
+                text_cleaner=text_cleaner,
             )
             print(f"[done] Crawled items updated: {updated}")
 
-    return 0
+        if command in {"process", "run"}:
+            from .article_ai_pipeline import process_pending_articles
 
+            processed = process_pending_articles(
+                conn,
+                p1_model_dir=args.abuse_p1_model_dir,
+                p2_model_dir=args.abuse_p2_model_dir,
+                summary_model_path=args.summary_model_path,
+                summary_tokenizer_dir=args.summary_tokenizer_dir,
+                batch_size=args.ai_batch_size,
+                sentence_count=args.summary_sentences,
+                max_candidates=args.summary_max_candidates,
+                head_candidates=args.summary_head_candidates,
+                middle_candidates=args.summary_middle_candidates,
+                tail_candidates=args.summary_tail_candidates,
+                abuse_device=args.abuse_device,
+                summary_device=args.summary_device,
+                classify_max_attempts=args.classify_max_attempts,
+                summary_max_attempts=args.summary_max_attempts,
+            )
+            print(f"[done] AI pipeline completed items: {processed}")
+
+    return 0

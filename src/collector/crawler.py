@@ -4,7 +4,8 @@ from urllib.request import url2pathname
 
 import requests
 
-from .settings import USER_AGENT
+from .content_cleaner import should_llm_cleanup
+from .settings import DEFAULT_CRAWL_BATCH_SIZE, USER_AGENT
 from .storage import enqueue_article_job, now_iso
 from .utils import extract_article_text
 
@@ -18,7 +19,6 @@ def fetch_url_text(url: str, offline: bool) -> str | None:
     """
     parsed = urlparse(url)
     if parsed.scheme == "file":
-        # file:// URI는 OS별 로컬 경로 규칙에 맞게 변환해야 한다.
         local_path = url2pathname(unquote(parsed.path))
         with open(local_path, "r", encoding="utf-8") as handle:
             html = handle.read()
@@ -36,7 +36,36 @@ def fetch_url_text(url: str, offline: bool) -> str | None:
     return extract_article_text(response.text)
 
 
-def crawl_articles(conn, min_crawl_len: int, offline: bool, domain_delay: float) -> int:
+def _load_crawl_batch(conn, crawl_batch_size: int) -> list:
+    return conn.query(
+        """
+        SELECT id, link
+        FROM articles
+        WHERE status = 'needs_crawl' AND link IS NOT NULL
+        ORDER BY created_at ASC, id ASC
+        LIMIT ?
+        """,
+        (crawl_batch_size,),
+    )
+
+
+def _mark_crawl_failed(conn, article_id: int) -> None:
+    conn.execute(
+        "UPDATE articles SET status = ?, updated_at = ? WHERE id = ?",
+        ("crawl_failed", now_iso(), article_id),
+    )
+
+
+def crawl_articles(
+    conn,
+    min_crawl_len: int,
+    offline: bool,
+    domain_delay: float,
+    crawl_batch_size: int = DEFAULT_CRAWL_BATCH_SIZE,
+    llm_cleanup: bool = False,
+    llm_cleanup_model: str | None = None,
+    text_cleaner=None,
+) -> int:
     """`needs_crawl` 상태의 기사 원문을 가져와 DB에 반영한다.
 
     크롤링 결과가 `min_crawl_len`보다 길면 실제 본문을 확보했다고 보고
@@ -44,62 +73,116 @@ def crawl_articles(conn, min_crawl_len: int, offline: bool, domain_delay: float)
     높으므로 `crawl_failed`로 남긴다. 개별 기사 실패는 전체 배치를 중단하지 않고
     다음 기사로 넘어간다.
     """
-    rows = conn.query(
-        "SELECT id, link FROM articles WHERE status = 'needs_crawl' AND link IS NOT NULL"
-    )
+    if crawl_batch_size <= 0:
+        raise ValueError("crawl_batch_size must be greater than 0.")
+
+    cleaner = text_cleaner
     last_hit: dict[str, float] = {}
     updated = 0
+    batch_no = 0
 
-    for row in rows:
-        article_id, link = row["id"], row["link"]
-        parsed = urlparse(link)
-        skipped_offline_http = offline and parsed.scheme in {"http", "https"}
-        if skipped_offline_http:
-            print(f"[skip] offline mode: {link}")
-            continue
-        if parsed.scheme in {"http", "https"}:
-            # 같은 도메인에 연속 요청하지 않도록 최소 간격을 둔다.
-            host = parsed.netloc
-            last_time = last_hit.get(host, 0)
-            wait = domain_delay - (time.time() - last_time)
-            if wait > 0:
-                time.sleep(wait)
-            last_hit[host] = time.time()
+    print(
+        "[crawl] start "
+        f"(batch_size={crawl_batch_size}, min_crawl_len={min_crawl_len}, "
+        f"offline={offline}, llm_cleanup={llm_cleanup or cleaner is not None})"
+    )
 
-        try:
-            text = fetch_url_text(link, offline=offline)
-        except Exception as exc:
-            # 개별 기사 실패가 전체 배치를 멈추지 않도록 상태만 남기고 다음 기사로 넘어간다.
-            print(f"[warn] crawl failed: {link} ({exc})")
-            conn.execute(
-                "UPDATE articles SET status = ?, updated_at = ? WHERE id = ?",
-                ("crawl_failed", now_iso(), article_id),
-            )
-            continue
+    while True:
+        rows = _load_crawl_batch(conn, crawl_batch_size)
+        if not rows:
+            break
 
-        if text and len(text) >= min_crawl_len:
-            # 충분한 본문을 확보한 기사만 후속 AI 처리 큐로 넘긴다.
-            # 상태 UPDATE와 큐 INSERT를 한 트랜잭션으로 묶어 기사 단위로 원자적으로 커밋한다.
-            with conn.transaction():
-                conn.execute(
-                    """
-                    UPDATE articles
-                    SET content = ?, content_source = ?, status = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (text, "crawl", "ready", now_iso(), article_id),
+        batch_no += 1
+        batch_ready = 0
+        batch_failed = 0
+        batch_skipped = 0
+        finished_in_batch = 0
+        print(f"[crawl-batch] {batch_no} -> loaded {len(rows)} pending items")
+
+        for row in rows:
+            article_id, link = row["id"], row["link"]
+            parsed = urlparse(link)
+            skipped_offline_http = offline and parsed.scheme in {"http", "https"}
+            if skipped_offline_http:
+                print(f"[skip] crawl offline: article={article_id} link={link}")
+                batch_skipped += 1
+                continue
+
+            if parsed.scheme in {"http", "https"}:
+                host = parsed.netloc
+                last_time = last_hit.get(host, 0)
+                wait = domain_delay - (time.time() - last_time)
+                if wait > 0:
+                    time.sleep(wait)
+                last_hit[host] = time.time()
+
+            try:
+                text = fetch_url_text(link, offline=offline)
+            except Exception as exc:
+                print(f"[warn] crawl failed: article={article_id} link={link} ({exc})")
+                _mark_crawl_failed(conn, article_id)
+                batch_failed += 1
+                finished_in_batch += 1
+                continue
+
+            if text and (llm_cleanup or cleaner is not None):
+                needs_cleanup, cleanup_reasons = should_llm_cleanup(text)
+                if needs_cleanup:
+                    reason_text = "; ".join(cleanup_reasons)
+                    print(f"[cleanup] article={article_id} link={link} -> using LLM ({reason_text})")
+                    try:
+                        if cleaner is None:
+                            from .content_cleaner import ArticleTextCleaner
+
+                            cleaner = ArticleTextCleaner(model=llm_cleanup_model)
+                        text = cleaner.clean(text)
+                        print(f"[cleanup] article={article_id} link={link} -> done ({len(text)} chars)")
+                    except Exception as exc:
+                        print(f"[warn] cleanup failed: article={article_id} link={link} ({exc})")
+                        _mark_crawl_failed(conn, article_id)
+                        batch_failed += 1
+                        finished_in_batch += 1
+                        continue
+
+            if text and len(text) >= min_crawl_len:
+                with conn.transaction():
+                    conn.execute(
+                        """
+                        UPDATE articles
+                        SET content = ?, content_source = ?, status = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (text, "crawl", "ready", now_iso(), article_id),
+                    )
+                    enqueue_article_job(conn, article_id)
+                print(f"[crawl] article={article_id} link={link} -> ready ({len(text)} chars)")
+                updated += 1
+                batch_ready += 1
+                finished_in_batch += 1
+            else:
+                text_len = len(text) if text else 0
+                print(
+                    "[warn] crawl failed: "
+                    f"article={article_id} link={link} "
+                    f"(content too short: {text_len} chars)"
                 )
-                enqueue_article_job(conn, article_id)
-            print(f"[crawl] {link} -> ready ({len(text)} chars)")
-            updated += 1
-        else:
-            text_len = len(text) if text else 0
-            print(f"[warn] crawl failed: {link} (content too short: {text_len} chars)")
-            # 너무 짧은 본문은 광고/캡션/요약만 잡힌 가능성이 높아 실패로 분류한다.
-            conn.execute(
-                "UPDATE articles SET status = ?, updated_at = ? WHERE id = ?",
-                ("crawl_failed", now_iso(), article_id),
-            )
+                _mark_crawl_failed(conn, article_id)
+                batch_failed += 1
+                finished_in_batch += 1
+
+        print(
+            f"[crawl-batch] {batch_no} -> "
+            f"ready={batch_ready}, failed={batch_failed}, "
+            f"skipped={batch_skipped}, total_ready={updated}"
+        )
+
+        if finished_in_batch == 0:
+            break
+
+    if batch_no == 0:
+        print("[crawl] no articles need crawling")
+    else:
+        print(f"[crawl] completed -> ready={updated}, batches={batch_no}")
 
     return updated
 

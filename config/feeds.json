@@ -5,13 +5,6 @@
     "https://www.chosun.com/arc/outboundfeeds/rss/category/national/?outputType=xml",
     "https://www.chosun.com/arc/outboundfeeds/rss/category/international/?outputType=xml",
 
-    "https://www.yna.co.kr/rss/politics.xml",
-    "https://www.yna.co.kr/rss/northkorea.xml",
-    "https://www.yna.co.kr/rss/economy.xml",
-    "https://www.yna.co.kr/rss/industry.xml",
-    "https://www.yna.co.kr/rss/society.xml",
-    "https://www.yna.co.kr/rss/international.xml",
-
 
     "https://www.yonhapnewstv.co.kr/category/news/politics/feed/",
     "https://www.yonhapnewstv.co.kr/category/news/economy/feed/",

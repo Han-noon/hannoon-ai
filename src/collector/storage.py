@@ -512,3 +512,127 @@ def enqueue_article_job(conn, article_id: int) -> None:
         """,
         (article_id, "pending", 0, None, None, now, now),
     )
+
+
+def load_pending_ai_pipeline_jobs(conn, limit: int) -> list:
+    """어뷰징 분류와 요약을 기사 단위로 이어서 처리할 ready 기사를 가져온다."""
+    if limit <= 0:
+        raise ValueError("limit must be greater than 0.")
+    return conn.query(
+        """
+        SELECT
+            article_jobs.id AS job_id,
+            article_jobs.article_id AS article_id,
+            article_jobs.attempts AS attempts,
+            articles.title AS title,
+            articles.summary AS rss_summary,
+            articles.category AS category,
+            articles.content AS content,
+            articles.link AS link,
+            article_ai_results.abuse_score AS abuse_score,
+            article_ai_results.abuse_label AS abuse_label,
+            article_ai_results.summary AS ai_summary
+        FROM article_jobs
+        JOIN articles ON articles.id = article_jobs.article_id
+        LEFT JOIN article_ai_results
+          ON article_ai_results.article_id = article_jobs.article_id
+        WHERE article_jobs.status = ?
+          AND articles.status = ?
+          AND articles.content IS NOT NULL
+        ORDER BY article_jobs.created_at ASC, article_jobs.id ASC
+        LIMIT ?
+        """,
+        ("pending", "ready", limit),
+    )
+
+
+def save_article_ai_result(
+    conn,
+    *,
+    article_id: int,
+    abuse_score: float,
+    abuse_label: str,
+) -> None:
+    """article_ai_results에서 어뷰징 관련 필드만 저장한다."""
+    now = now_iso()
+    conn.execute(
+        """
+        INSERT INTO article_ai_results (
+            article_id,
+            abuse_score,
+            abuse_label,
+            created_at,
+            updated_at
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(article_id) DO UPDATE SET
+            abuse_score = excluded.abuse_score,
+            abuse_label = excluded.abuse_label
+        """,
+        (
+            article_id,
+            abuse_score,
+            abuse_label,
+            now,
+            now,
+        ),
+    )
+
+
+def save_article_summary_result(conn, *, article_id: int, summary: str) -> None:
+    """article_ai_results에서 요약 필드만 저장한다."""
+    now = now_iso()
+    conn.execute(
+        """
+        INSERT INTO article_ai_results (
+            article_id,
+            summary,
+            created_at,
+            updated_at
+        ) VALUES (?, ?, ?, ?)
+        ON CONFLICT(article_id) DO UPDATE SET
+            summary = excluded.summary,
+            updated_at = excluded.updated_at
+        """,
+        (
+            article_id,
+            summary,
+            now,
+            now,
+        ),
+    )
+
+
+def mark_article_job_sent(conn, job_id: int) -> None:
+    """후속 AI 처리가 끝난 기사 작업을 완료 상태로 표시한다."""
+    now = now_iso()
+    conn.execute(
+        """
+        UPDATE article_jobs
+        SET status = ?, last_error = ?, last_attempt_at = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        ("sent", None, now, now, job_id),
+    )
+
+
+def mark_article_job_failed(conn, job_id: int, error: str, max_attempts: int) -> None:
+    """분류 실패 시도 정보를 기록한다."""
+    now = now_iso()
+    status = """
+        CASE
+            WHEN COALESCE(attempts, 0) + 1 >= ? THEN 'failed'
+            ELSE 'pending'
+        END
+    """
+    conn.execute(
+        f"""
+        UPDATE article_jobs
+        SET status = {status},
+            attempts = COALESCE(attempts, 0) + 1,
+            last_error = ?,
+            last_attempt_at = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (max_attempts, error, now, now, job_id),
+    )

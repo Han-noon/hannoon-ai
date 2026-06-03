@@ -39,7 +39,8 @@ python main.py --feed https://feeds.bbci.co.uk/news/rss.xml run
 
 - `fetch`: RSS 항목만 수집해 저장합니다.
 - `crawl`: 원문 크롤링이 필요한 기사만 처리합니다.
-- `run`: RSS 수집 후 필요한 기사 원문을 크롤링합니다. 명령을 생략하면 기본값으로 `run`이 실행됩니다.
+- `process`: 본문이 준비된 기사에 대해 어뷰징 분류 후 정상 기사만 요약합니다.
+- `run`: RSS 수집, 원문 크롤링, 어뷰징 분류, 정상 기사 요약까지 실행합니다. 명령을 생략하면 기본값으로 `run`이 실행됩니다.
 
 ## 주요 옵션
 
@@ -49,6 +50,9 @@ python main.py --feed https://feeds.bbci.co.uk/news/rss.xml run
 - `--feed`: 추가 RSS 피드 URL 또는 로컬 피드 파일 경로입니다. 여러 번 지정할 수 있습니다.
 - `--min-rss-len`: RSS 본문이 이 길이보다 짧으면 원문 크롤링 대상으로 표시합니다.
 - `--min-crawl-len`: 크롤링한 본문을 유효한 기사 본문으로 인정할 최소 길이입니다.
+- `--crawl-batch-size`: 한 번에 DB에서 가져와 처리할 크롤링 배치 크기입니다. `needs_crawl` 기사가 남아 있으면 다음 배치를 계속 처리합니다. 기본값은 `20`입니다.
+- `--llm-cleanup`: 크롤링한 본문이 광고/구독 유도/관련기사 문구 등으로 의심될 때만 LLM으로 정제합니다.
+- `--llm-cleanup-model`: `--llm-cleanup`에 사용할 OpenAI 모델입니다. 기본값은 `gpt-4.1-mini`입니다.
 - `--domain-delay`: 같은 도메인에 연속 요청할 때 기다릴 시간(초)입니다.
 - `--offline`: HTTP/HTTPS 요청을 건너뜁니다. 로컬 피드 파일 테스트에 사용할 수 있습니다.
 
@@ -106,3 +110,37 @@ Supabase/Postgres에서 필요한 테이블이나 컬럼이 없으면 앱은 DDL
 - `attempts`: 후속 처리 시도 횟수입니다.
 - `last_error`: 마지막 실패 메시지입니다.
 - `last_attempt_at`: 마지막 후속 처리 시각입니다.
+
+## AI 후속 처리 작업
+
+크롤링으로 본문이 준비된 기사(`ready`)를 `article_jobs` 큐에서 가져와 기사 단위로 어뷰징 분류 후 정상 기사만 바로 요약합니다.
+
+- `models/clickbait-classifier`: 낚시성 기사 분류 모델
+- `models/topic-mismatch-detector`: 본문 주제분리 탐지 모델
+- 두 모델 중 하나라도 `abuse`면 최종 `abuse`, 둘 다 `normal`이면 최종 `normal`
+- `--ai-batch-size`는 전체 개수 제한이 아니라 한 번에 가져올 AI 처리 배치 크기입니다. 기본값은 `20`입니다.
+- `article_ai_results`에서는 `abuse_score`, `abuse_label`만 저장/수정합니다.
+- `abuse` 기사는 요약하지 않고 `sent` 처리하며, `normal` 기사는 즉시 요약 후 `sent` 처리합니다.
+- 저장 성공 후 `abuse_result=saved`, `summary=saved`, `job_status=sent` 로그가 출력됩니다.
+
+실행:
+
+```bash
+python main.py process
+```
+
+## 정상 기사 요약 작업
+
+요약은 `process` 또는 `run` 안에서 정상 기사에 대해 이어서 실행됩니다.
+
+- `models/summary/bertsum_ext_model.pt`: KLUE BERT 기반 추출형 요약 모델
+- 긴 기사는 본문 전체를 한 번에 넣지 않고 앞/중간/끝 문장을 나눠 점수화한 뒤 상위 문장을 뽑습니다.
+- `article_ai_results`에서는 `summary`만 저장/수정합니다.
+
+실행:
+
+```bash
+python main.py run
+```
+
+모델 weight는 Git에 올리지 않고 `models/` 아래에 별도로 배치합니다.
