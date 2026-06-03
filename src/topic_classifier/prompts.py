@@ -7,16 +7,15 @@
 from db.topic_causes import TopicCandidate
 
 
-def build_topic_cause_result_prompt(title: str, summary: str) -> str:
-    """이벤트 제목·요약에서 원인(cause)과 결과(result)를 추출하는 프롬프트를 생성한다.
+def build_topic_cause_result_prompt(event_text: str) -> str:
+    """이벤트 대표 기사(제목 + 첫 문단)에서 원인(cause)과 결과(result)를 추출하는 프롬프트를 생성한다.
 
     LLM 응답 형식: {"cause": "...", "result": "..."}
     """
     return f"""다음 뉴스 이벤트에서 핵심 '원인'과 '결과'를 각각 한 문장으로 추출하세요.
 
 [이벤트]
-제목: {title}
-요약: {summary}
+{event_text}
 
 [작성 규칙]
 - 각 문장은 "[주체·지역] + [핵심 행위/사건] + [대상]" 구조를 따른다.
@@ -65,6 +64,42 @@ def build_topic_assignment_prompt(
 다음 JSON 형식 중 하나로만 응답하세요. 위 필드 외 추가 필드를 포함하지 마세요.
 배정 시: {{"action": "assign", "topic_id": <정수>, "reason": "배정 근거"}}
 생성 시: {{"action": "create", "new_title": "<새 토픽 제목>", "reason": "신규 생성 근거"}}"""
+
+
+def build_topic_update_prompt(
+    old_title: str,
+    old_summary: str,
+    event_title: str,
+    event_summary: str,
+) -> str:
+    """기존 토픽의 제목·요약을 새로 배정된 이벤트를 반영해 최신화하는 프롬프트를 생성한다.
+
+    사건이 전개될수록 토픽 메타데이터가 초기 이벤트에 고정되지 않도록,
+    배정 시점의 최신 상황을 반영한 제목·요약을 재생성한다.
+
+    LLM 응답 형식: {"title": "...", "summary": "..."}
+    """
+    return f"""다음은 하나의 토픽(사건)과 그 토픽에 새로 배정된 이벤트입니다.
+기존 토픽 요약에 새 이벤트를 통합해, 현재 시점 기준으로 토픽의 제목과 요약을 갱신하세요.
+
+[현재 토픽]
+제목: {old_title}
+요약: {old_summary}
+
+[새로 배정된 이벤트]
+제목: {event_title}
+요약: {event_summary}
+
+[작성 규칙]
+- 갱신은 기존 요약을 단순 대체하는 것이 아니라, 기존 경위에 새 이벤트의 사실을 통합하는 것이다. 기존 요약의 중요한 맥락은 유지한다.
+- 요약은 토픽(사건) 자체를 설명하는 독립된 글이어야 한다. "새로 배정된 이벤트", "추가로", "이번 보도" 등 갱신 과정이나 입력 구조를 가리키는 표현을 쓰지 않는다.
+- 확인된 사실만 기술한다. 분석·해석·평가·전망(예: "구체화되고 있다")이나 "전반적으로", "이를 통해" 같은 총평·연결식 문장을 넣지 않는다.
+- 제목은 '주체 + 핵심 사건' 형태로 간결하게 유지한다 (예: "삼성전자 노조 총파업"). 새 이벤트로 사건의 핵심 프레이밍이 실질적으로 바뀐 경우에만 제목을 변경하고, 그렇지 않으면 기존 제목을 유지한다.
+- 문체는 '~다'체 평서문(예: "~한다", "~했다")으로 통일하고, 수식어·비유·감정 표현을 제거한다.
+- 핵심 사실만 간결하게 담고, 불필요하게 문장을 늘리지 않는다.
+- 기존 토픽이 다루던 사건의 범위를 벗어나지 않는다(다른 사건을 끌어들이지 않는다).
+
+다음 JSON 형식으로만 응답하세요: {{"title": "...", "summary": "..."}}"""
 
 
 def _format_candidates(candidates: list[TopicCandidate]) -> str:

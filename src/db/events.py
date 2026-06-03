@@ -15,6 +15,8 @@ class Event:
     category: str
     title: str
     summary: str
+    # 대표 기사(제목 + 첫 문단). cause/result 추출 입력으로 사용한다.
+    embedding_text: str
 
 
 # ── SQL 상수 ────────────────────────────────────────────────────────────────
@@ -23,7 +25,7 @@ class Event:
 # 임계값 이상인 이벤트를 (created_at, id) 기준 오름차순으로 가져온다.
 # 순서를 보장해야 prev/next 체인이 시간순으로 연결된다.
 FETCH_UNASSIGNED_SQL = """
-SELECT id, category, title, summary
+SELECT id, category, title, summary, embedding_text
 FROM events
 WHERE topic_id IS NULL
   AND (article_count - abusing_count) >= ?
@@ -77,7 +79,8 @@ def fetch_unassigned(conn, min_net: int, batch_size: int) -> list[Event]:
     min_net: (article_count - abusing_count) 최소값. 기준 미달 이벤트는 제외한다.
     """
     rows = conn.query(FETCH_UNASSIGNED_SQL, (min_net, batch_size))
-    return [Event(id=r["id"], category=r["category"], title=r["title"], summary=r["summary"])
+    return [Event(id=r["id"], category=r["category"], title=r["title"], summary=r["summary"],
+                  embedding_text=r["embedding_text"])
             for r in rows]
 
 

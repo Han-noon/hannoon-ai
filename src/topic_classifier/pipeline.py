@@ -19,6 +19,7 @@ from openai_client.client import OpenAIClient
 from topic_classifier.prompts import (
     build_topic_cause_result_prompt,
     build_topic_assignment_prompt,
+    build_topic_update_prompt,
 )
 from topic_classifier.settings import (
     BATCH_SIZE,
@@ -48,7 +49,7 @@ def _validate_topic_schema(conn) -> None:
     """
     required = {
         "events": {
-            "id", "topic_id", "category", "title", "summary",
+            "id", "topic_id", "category", "title", "summary", "embedding_text",
             "article_count", "abusing_count", "created_at",
             "prev_event_id", "next_event_id", "reason",
         },
@@ -135,10 +136,10 @@ def run(conn) -> int:
         try:
             print(f"[topic] event {ev.id} 처리 중: {ev.title}")
 
-            # 2단계: 이벤트에서 원인(cause)과 결과(result) 추출
+            # 2단계: 대표 기사(embedding_text)에서 원인(cause)과 결과(result) 추출
             print(f"[topic] event {ev.id} → cause/result 추출 중")
             cr = _call_json(
-                build_topic_cause_result_prompt(ev.title, ev.summary),
+                build_topic_cause_result_prompt(ev.embedding_text),
                 required_keys={"cause", "result"},
             )
             print(f"[topic] event {ev.id}  cause: {cr['cause']}")
@@ -175,6 +176,20 @@ def run(conn) -> int:
                         f"LLM이 후보에 없는 topic_id={decision['topic_id']}를 반환했습니다."
                     )
 
+            # assign이면 배정 시점 기준으로 토픽 제목·요약을 최신화한다(LLM, 트랜잭션 밖).
+            # 현재 토픽 제목·요약은 후보 검색 결과에 이미 들어 있어 추가 조회가 필요 없다.
+            topic_update = None
+            if action == "assign":
+                chosen = next(
+                    c for c in candidates if c.topic_id == int(decision["topic_id"])
+                )
+                topic_update = _call_json(
+                    build_topic_update_prompt(
+                        chosen.title, chosen.summary, ev.title, ev.summary
+                    ),
+                    required_keys={"title", "summary"},
+                )
+
             # result 임베딩은 트랜잭션 밖에서 미리 계산해 점유 시간을 줄인다.
             result_lit = to_vector_literal(embed(cr["result"]))
 
@@ -188,12 +203,20 @@ def run(conn) -> int:
                     )
                 else:
                     topic_id = int(decision["topic_id"])
+                    # 5-1b. 기존 토픽 제목·요약을 최신 이벤트 기준으로 갱신
+                    topics.update_topic(
+                        conn, topic_id, topic_update["title"], topic_update["summary"]
+                    )
 
                 # 5-2. 이벤트 ↔ 토픽 매핑 (배정 근거 reason 함께 기록)
                 events.assign_topic(conn, ev.id, topic_id, decision.get("reason"))
 
                 # 5-3. topic_causes 누적 (result를 cause_text로 저장한다, D4)
                 topic_causes.add_cause(conn, topic_id, cr["result"], result_lit)
+                # 신규 토픽은 최초 이벤트의 cause가 발단이 되므로, 이후 유사 이벤트가
+                # 검색으로 이 토픽을 찾을 수 있도록 cause도 함께 적재한다.
+                if action == "create":
+                    topic_causes.add_cause(conn, topic_id, cr["cause"], cause_lit)
 
                 # 5-4. 이벤트 체인 연결 (동일 토픽 내 시간순, linked-list 삽입)
                 prev = events.find_prev_event(conn, topic_id, ev.id)
@@ -206,6 +229,10 @@ def run(conn) -> int:
             processed += 1
             action_label = "create" if decision["action"] == "create" else f"assign → {topic_id}"
             print(f"[topic] event {ev.id} → {action_label} ✓")
+            if action == "assign":
+                print(f"[topic] title: {chosen.title!r} → {topic_update['title']!r}")
+                print(f"[topic] summary: {chosen.summary!r} → {topic_update['summary']!r}")
+            print()
 
         except Exception as e:
             # 순서 보장을 위해 배치를 중단한다(D2).
