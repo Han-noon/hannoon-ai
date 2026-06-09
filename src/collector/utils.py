@@ -155,6 +155,183 @@ def _looks_like_url(value: str) -> bool:
     return parsed.scheme in {"http", "https"}
 
 
+UNWANTED_IMAGE_TOKENS = {
+    "ad",
+    "ads",
+    "advert",
+    "avatar",
+    "banner",
+    "blank",
+    "btn",
+    "button",
+    "default",
+    "facebook",
+    "icon",
+    "kakao",
+    "logo",
+    "pixel",
+    "profile",
+    "share",
+    "sns",
+    "spacer",
+    "sprite",
+    "twitter",
+}
+
+
+def _image_url_from_srcset(value: str | None) -> str:
+    """srcset 후보 중 가장 앞의 URL을 대표 이미지 후보로 사용한다."""
+    if not value:
+        return ""
+    for candidate in value.split(","):
+        url = candidate.strip().split(" ")[0].strip()
+        if url:
+            return url
+    return ""
+
+
+def _normalize_image_url(value: str | None, base_url: str | None = None) -> str:
+    """상대 경로/프로토콜 생략 이미지 URL을 저장 가능한 절대 URL로 정규화한다."""
+    if not value:
+        return ""
+    value = value.strip()
+    if not value or value.startswith(("data:", "blob:", "javascript:")):
+        return ""
+    if value.startswith("//"):
+        scheme = urlparse(base_url or "").scheme
+        if scheme not in {"http", "https"}:
+            scheme = "https"
+        value = f"{scheme}:{value}"
+    if base_url:
+        value = urljoin(base_url, value)
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https", "file"}:
+        return ""
+    return value
+
+
+def _is_unwanted_image_url(url: str) -> bool:
+    """로고, 아이콘, 광고처럼 기사 대표 이미지로 부적절한 URL을 걸러낸다."""
+    parsed = urlparse(url)
+    target = f"{parsed.netloc} {parsed.path}".lower().replace("_", "-")
+    tokens = {part for chunk in target.split("/") for part in chunk.split("-") if part}
+    return bool(tokens.intersection(UNWANTED_IMAGE_TOKENS))
+
+
+def _small_image_by_attrs(img) -> bool:
+    """명시된 크기가 너무 작으면 아이콘/버튼일 가능성이 높아 제외한다."""
+    def parse_int(value) -> int | None:
+        if value is None:
+            return None
+        digits = "".join(ch for ch in str(value) if ch.isdigit())
+        if not digits:
+            return None
+        return int(digits)
+
+    width = parse_int(img.get("width"))
+    height = parse_int(img.get("height"))
+    if width is None or height is None:
+        return False
+    return width < 120 or height < 80
+
+
+def _image_url_from_img(img, base_url: str | None = None) -> str:
+    """img 태그의 여러 lazy-load 속성에서 실제 이미지 URL을 찾는다."""
+    if img is None or _small_image_by_attrs(img):
+        return ""
+    raw_url = (
+        img.get("src")
+        or img.get("data-src")
+        or img.get("data-original")
+        or img.get("data-lazy-src")
+        or img.get("data-url")
+        or _image_url_from_srcset(img.get("srcset"))
+        or _image_url_from_srcset(img.get("data-srcset"))
+    )
+    image_url = _normalize_image_url(raw_url, base_url)
+    if image_url and not _is_unwanted_image_url(image_url):
+        return image_url
+    return ""
+
+
+def _first_image_in_node(node, base_url: str | None = None) -> str:
+    """본문 컨테이너 안에서 첫 번째 유효 이미지를 찾는다."""
+    if node is None:
+        return ""
+    for img in node.find_all("img"):
+        image_url = _image_url_from_img(img, base_url)
+        if image_url:
+            return image_url
+    return ""
+
+
+def _extract_meta_image(soup: BeautifulSoup, base_url: str | None = None) -> str:
+    """본문 이미지가 없을 때 사용할 OpenGraph/Twitter 대표 이미지를 찾는다."""
+    selectors = [
+        'meta[property="og:image"]',
+        'meta[property="og:image:url"]',
+        'meta[name="og:image"]',
+        'meta[name="twitter:image"]',
+        'meta[property="twitter:image"]',
+        'meta[name="twitter:image:src"]',
+        'link[rel="image_src"]',
+    ]
+    for selector in selectors:
+        node = soup.select_one(selector)
+        if node is None:
+            continue
+        image_url = _normalize_image_url(node.get("content") or node.get("href"), base_url)
+        if image_url and not _is_unwanted_image_url(image_url):
+            return image_url
+    return ""
+
+
+def extract_entry_image_url(entry, base_url: str | None = None) -> str:
+    """RSS entry에 선언된 이미지 URL을 fallback 후보로 추출한다."""
+    for key in ("media_content", "media_thumbnail"):
+        for media in entry.get(key, []) or []:
+            if not isinstance(media, dict):
+                continue
+            image_url = _normalize_image_url(media.get("url") or media.get("href"), base_url)
+            if image_url and not _is_unwanted_image_url(image_url):
+                return image_url
+
+    for enclosure in entry.get("enclosures", []) or []:
+        if not isinstance(enclosure, dict):
+            continue
+        media_type = (enclosure.get("type") or "").lower()
+        if media_type and not media_type.startswith("image/"):
+            continue
+        image_url = _normalize_image_url(enclosure.get("url") or enclosure.get("href"), base_url)
+        if image_url and not _is_unwanted_image_url(image_url):
+            return image_url
+
+    for link in entry.get("links", []) or []:
+        if not isinstance(link, dict):
+            continue
+        media_type = (link.get("type") or "").lower()
+        rel = (link.get("rel") or "").lower()
+        if media_type.startswith("image/") or rel in {"enclosure", "image"}:
+            image_url = _normalize_image_url(link.get("href") or link.get("url"), base_url)
+            if image_url and not _is_unwanted_image_url(image_url):
+                return image_url
+
+    html_parts: list[str] = []
+    if entry.get("content"):
+        for content in entry.get("content") or []:
+            if isinstance(content, dict):
+                html_parts.append(content.get("value") or "")
+    html_parts.append(entry.get("summary") or entry.get("description") or "")
+    for html in html_parts:
+        if not html or "<img" not in html.lower():
+            continue
+        soup = BeautifulSoup(html, "html.parser")
+        image_url = _first_image_in_node(soup, base_url)
+        if image_url:
+            return image_url
+    return ""
+
+
 def html_to_text(html: str | None) -> str:
     """RSS summary/content HTML을 후속 처리용 plain text로 정규화한다."""
     if not html:
@@ -309,6 +486,109 @@ def _extract_declared_article_body(soup: BeautifulSoup) -> str:
         if len(text) >= 200:
             return text
     return ""
+
+
+def _image_from_fusion_element(element: dict, base_url: str | None = None) -> str:
+    """Arc/Fusion CMS content element에서 이미지 URL 후보를 찾는다."""
+    for key in ("url", "src", "image_url", "canonical_url"):
+        image_url = _normalize_image_url(element.get(key), base_url)
+        if image_url and not _is_unwanted_image_url(image_url):
+            return image_url
+
+    additional = element.get("additional_properties")
+    if isinstance(additional, dict):
+        for key in ("originalUrl", "fullSizeResizeUrl", "thumbnailResizeUrl"):
+            image_url = _normalize_image_url(additional.get(key), base_url)
+            if image_url and not _is_unwanted_image_url(image_url):
+                return image_url
+
+    nested = element.get("content_elements")
+    if isinstance(nested, list):
+        return _collect_content_element_image(nested, base_url)
+    return ""
+
+
+def _collect_content_element_image(elements: list[dict], base_url: str | None = None) -> str:
+    """중첩된 Fusion content_elements를 순회하며 첫 이미지 후보를 찾는다."""
+    for element in elements:
+        if not isinstance(element, dict):
+            continue
+        image_url = _image_from_fusion_element(element, base_url)
+        if image_url:
+            return image_url
+    return ""
+
+
+def _extract_fusion_global_image(html: str, base_url: str | None = None) -> str:
+    """조선일보 등 Fusion.globalContent 기반 페이지에서 대표 이미지를 추출한다."""
+    marker = "Fusion.globalContent="
+    start = html.find(marker)
+    if start < 0:
+        return ""
+    start += len(marker)
+    end = html.find(";Fusion.globalContentConfig=", start)
+    if end < 0:
+        return ""
+
+    try:
+        data = json.loads(html[start:end])
+    except json.JSONDecodeError:
+        return ""
+
+    promo_items = data.get("promo_items")
+    if isinstance(promo_items, dict):
+        for promo in promo_items.values():
+            if isinstance(promo, dict):
+                image_url = _image_from_fusion_element(promo, base_url)
+                if image_url:
+                    return image_url
+
+    elements = data.get("content_elements")
+    if isinstance(elements, list):
+        return _collect_content_element_image(elements, base_url)
+    return ""
+
+
+def _extract_declared_article_image(soup: BeautifulSoup, base_url: str | None = None) -> str:
+    """명시적인 기사 본문 컨테이너 안의 이미지를 최우선 후보로 사용한다."""
+    for selector in ARTICLE_BODY_SELECTORS:
+        node = soup.select_one(selector)
+        image_url = _first_image_in_node(node, base_url)
+        if image_url:
+            return image_url
+    return ""
+
+
+def extract_article_image_url(html: str, page_url: str | None = None) -> str:
+    """크롤링한 HTML에서 기사 이미지 URL을 추출한다."""
+    fusion_image = _extract_fusion_global_image(html, page_url)
+    if fusion_image:
+        return fusion_image
+
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+    except Exception:
+        return ""
+
+    declared_image = _extract_declared_article_image(soup, page_url)
+    if declared_image:
+        return declared_image
+
+    for selector in ["article", "main"]:
+        for node in soup.find_all(selector):
+            image_url = _first_image_in_node(node, page_url)
+            if image_url:
+                return image_url
+
+    meta_image = _extract_meta_image(soup, page_url)
+    if meta_image:
+        return meta_image
+    return ""
+
+
+def extract_article_data(html: str, page_url: str | None = None) -> tuple[str, str]:
+    """크롤러 호출부가 같은 HTML 응답에서 본문과 이미지 URL을 함께 받게 하는 래퍼다."""
+    return extract_article_text(html), extract_article_image_url(html, page_url)
 
 
 def extract_article_text(html: str) -> str:

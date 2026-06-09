@@ -7,10 +7,10 @@ import requests
 from .content_cleaner import should_llm_cleanup
 from .settings import DEFAULT_CRAWL_BATCH_SIZE, USER_AGENT
 from .storage import enqueue_article_job, now_iso
-from .utils import extract_article_text
+from .utils import extract_article_data
 
 
-def fetch_url_text(url: str, offline: bool) -> str | None:
+def fetch_url_article_data(url: str, offline: bool) -> tuple[str | None, str | None]:
     """기사 URL에서 본문 텍스트를 추출한다.
 
     HTTP/HTTPS URL은 requests로 가져오고, file:// URL은 로컬 HTML 파일을 읽는다.
@@ -22,24 +22,24 @@ def fetch_url_text(url: str, offline: bool) -> str | None:
         local_path = url2pathname(unquote(parsed.path))
         with open(local_path, "r", encoding="utf-8") as handle:
             html = handle.read()
-        return extract_article_text(html)
+        return extract_article_data(html, url)
 
     if offline:
         print(f"[skip] offline mode: {url}")
-        return None
+        return None, None
 
     headers = {"User-Agent": USER_AGENT}
     response = requests.get(url, headers=headers, timeout=15)
     response.raise_for_status()
     # 국내 언론사는 응답 헤더의 charset이 비어 있거나 부정확한 경우가 있어 requests 추정값을 우선한다.
     response.encoding = response.apparent_encoding or response.encoding
-    return extract_article_text(response.text)
+    return extract_article_data(response.text, url)
 
 
 def _load_crawl_batch(conn, crawl_batch_size: int) -> list:
     return conn.query(
         """
-        SELECT id, link
+        SELECT id, link, article_image_url
         FROM articles
         WHERE status = 'needs_crawl' AND link IS NOT NULL
         ORDER BY created_at ASC, id ASC
@@ -101,6 +101,7 @@ def crawl_articles(
 
         for row in rows:
             article_id, link = row["id"], row["link"]
+            fallback_image_url = row["article_image_url"]
             parsed = urlparse(link)
             skipped_offline_http = offline and parsed.scheme in {"http", "https"}
             if skipped_offline_http:
@@ -117,7 +118,7 @@ def crawl_articles(
                 last_hit[host] = time.time()
 
             try:
-                text = fetch_url_text(link, offline=offline)
+                text, crawled_image_url = fetch_url_article_data(link, offline=offline)
             except Exception as exc:
                 print(f"[warn] crawl failed: article={article_id} link={link} ({exc})")
                 _mark_crawl_failed(conn, article_id)
@@ -145,17 +146,19 @@ def crawl_articles(
                         continue
 
             if text and len(text) >= min_crawl_len:
+                article_image_url = crawled_image_url or fallback_image_url
                 with conn.transaction():
                     conn.execute(
                         """
                         UPDATE articles
-                        SET content = ?, content_source = ?, status = ?, updated_at = ?
+                        SET content = ?, article_image_url = ?, content_source = ?, status = ?, updated_at = ?
                         WHERE id = ?
                         """,
-                        (text, "crawl", "ready", now_iso(), article_id),
+                        (text, article_image_url, "crawl", "ready", now_iso(), article_id),
                     )
                     enqueue_article_job(conn, article_id)
-                print(f"[crawl] article={article_id} link={link} -> ready ({len(text)} chars)")
+                image_state = "image=yes" if article_image_url else "image=no"
+                print(f"[crawl] article={article_id} link={link} -> ready ({len(text)} chars, {image_state})")
                 updated += 1
                 batch_ready += 1
                 finished_in_batch += 1
