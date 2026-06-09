@@ -1,6 +1,6 @@
-# NoiseFree RSS Collector
+# 한눈 RSS Collector
 
-RSS 피드에서 기사 항목을 수집해 SQLite에 저장하고, RSS 본문이 짧은 경우 원문 페이지를 크롤링해 본문을 보강하는 수집기입니다. 이후 욕설/악성 콘텐츠 탐지, 요약, 분류 같은 AI 처리 단계로 넘길 데이터를 준비하는 용도로 사용할 수 있습니다.
+RSS 피드에서 기사 항목을 수집해 SQLite에 저장하고, 모든 신규 기사 원문 페이지를 크롤링해 본문과 기사 이미지를 확보하는 수집기입니다. 이후 욕설/악성 콘텐츠 탐지, 요약, 분류 같은 AI 처리 단계로 넘길 데이터를 준비하는 용도로 사용할 수 있습니다.
 
 ## 프로젝트 구조
 
@@ -48,7 +48,6 @@ python main.py --feed https://feeds.bbci.co.uk/news/rss.xml run
 - `--database-url`: Supabase/Postgres 연결 URL입니다. 지정하지 않으면 `DATABASE_URL` 환경변수를 사용하고, 둘 다 없으면 SQLite를 사용합니다.
 - `--feeds-file`: RSS 피드 목록 JSON 파일 경로입니다. 기본값은 `config/feeds.json`입니다.
 - `--feed`: 추가 RSS 피드 URL 또는 로컬 피드 파일 경로입니다. 여러 번 지정할 수 있습니다.
-- `--min-rss-len`: RSS 본문이 이 길이보다 짧으면 원문 크롤링 대상으로 표시합니다.
 - `--min-crawl-len`: 크롤링한 본문을 유효한 기사 본문으로 인정할 최소 길이입니다.
 - `--crawl-batch-size`: 한 번에 DB에서 가져와 처리할 크롤링 배치 크기입니다. `needs_crawl` 기사가 남아 있으면 다음 배치를 계속 처리합니다. 기본값은 `20`입니다.
 - `--llm-cleanup`: 크롤링한 본문이 광고/구독 유도/관련기사 문구 등으로 의심될 때만 LLM으로 정제합니다.
@@ -85,7 +84,7 @@ Supabase/Postgres에서 필요한 테이블이나 컬럼이 없으면 앱은 DDL
 
 `articles.status` 값:
 
-- `needs_crawl`: RSS 본문이 짧아 원문 크롤링이 필요합니다.
+- `needs_crawl`: RSS에서 수집된 신규 기사이며 원문 크롤링이 필요합니다.
 - `ready`: 사용할 수 있는 본문이 준비되었습니다.
 - `crawl_failed`: 크롤링이 실패했거나 크롤링한 본문이 너무 짧습니다.
 
