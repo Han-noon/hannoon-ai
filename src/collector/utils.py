@@ -213,9 +213,9 @@ def _normalize_image_url(value: str | None, base_url: str | None = None) -> str:
 def _is_unwanted_image_url(url: str) -> bool:
     """로고, 아이콘, 광고처럼 기사 대표 이미지로 부적절한 URL을 걸러낸다."""
     parsed = urlparse(url)
-    target = f"{parsed.netloc} {parsed.path}".lower().replace("_", "-")
-    tokens = {part for chunk in target.split("/") for part in chunk.split("-") if part}
-    return bool(tokens.intersection(UNWANTED_IMAGE_TOKENS))
+    target = f"{parsed.netloc}/{parsed.path}".lower().replace("_", "-").replace(".", "-")
+    tokens = {part.strip() for chunk in target.split("/") for part in chunk.split("-") if part.strip()}
+    return bool(tokens & UNWANTED_IMAGE_TOKENS)
 
 
 def _small_image_by_attrs(img) -> bool:
