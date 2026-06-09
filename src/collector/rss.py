@@ -4,7 +4,13 @@ from urllib.parse import urlparse
 import feedparser
 
 from .storage import normalize_published, now_iso
-from .utils import html_to_text, infer_feed_category, infer_publisher_metadata, resolve_entry_link
+from .utils import (
+    extract_entry_image_url,
+    html_to_text,
+    infer_feed_category,
+    infer_publisher_metadata,
+    resolve_entry_link,
+)
 
 
 def encode_feed_modified(value) -> str | None:
@@ -30,13 +36,13 @@ def decode_feed_modified(value):
         return None
 
 
-def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
+def fetch_feed(conn, feed_url: str, offline: bool) -> int:
     """RSS 피드를 읽어 신규 기사만 저장한다.
 
-    RSS에서 충분한 본문을 얻으면 바로 `ready` 상태로 저장하고 article_jobs에 넣는다.
-    RSS 요약이 짧으면 `needs_crawl` 상태로 저장해 이후 크롤링 단계에서 원문을
-    보강하게 한다. 중복 기사는 GUID를 우선하고, GUID가 없거나 불안정한 피드는
-    링크를 대체 키로 사용한다.
+    RSS 본문은 언론사마다 품질이 다르므로 본문 처리 기준으로 신뢰하지 않는다.
+    링크가 있는 신규 기사는 항상 `needs_crawl` 상태로 저장하고, 크롤링 단계에서
+    원문 본문과 기사 이미지를 확정한다. 중복 기사는 GUID를 우선하고, GUID가 없거나
+    불안정한 피드는 링크를 대체 키로 사용한다.
     """
     # 이전 수집 시점의 ETag/modified_at을 넘겨 서버가 변경분만 응답할 수 있게 한다.
     row = conn.query_one("SELECT etag, modified_at FROM feeds WHERE url = ?", (feed_url,))
@@ -117,8 +123,9 @@ def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
                 content_html = entry.get("content")[0].get("value", "")
             summary_html = entry.get("summary") or entry.get("description") or ""
             content_text = html_to_text(content_html) or html_to_text(summary_html)
+            article_image_url = extract_entry_image_url(entry, link or feed_url)
 
-            # RSS content/summary는 신뢰 불가능. 항상 크롤링하도록 수정
+            # RSS content/summary는 신뢰 불가능하므로 링크가 있으면 항상 크롤링한다.
             status = "needs_crawl" if link else "crawl_failed"
             # content_source는 NOT NULL이라 RSS 단계에서는 항상 'rss'로 두고, 크롤 성공 시 'crawl'로 갱신한다.
             content_source = "rss"
@@ -128,8 +135,8 @@ def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
                 """
                 INSERT INTO articles (
                     feed_url, guid, link, category, title, publisher, bias_type, published_at, summary, content,
-                    content_source, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    article_image_url, content_source, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     feed_url,
@@ -143,6 +150,7 @@ def fetch_feed(conn, feed_url: str, min_rss_len: int, offline: bool) -> int:
                     normalize_published(entry.get("published") or entry.get("updated")) or now_iso(),
                     html_to_text(summary_html),
                     content_text,
+                    article_image_url or None,
                     content_source,
                     status,
                     now_iso(),

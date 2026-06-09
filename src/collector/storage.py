@@ -227,6 +227,7 @@ def ensure_sqlite_db(db_path: str) -> "SqliteConnection":
             published_at TEXT,
             summary TEXT,
             content TEXT,
+            article_image_url TEXT,
             content_source TEXT,
             status TEXT,
             created_at TEXT,
@@ -245,6 +246,7 @@ def ensure_sqlite_db(db_path: str) -> "SqliteConnection":
     _ensure_column(conn, "articles", "publisher", "TEXT")
     _ensure_column(conn, "articles", "bias_type", "TEXT")
     _ensure_column(conn, "articles", "published_at", "TEXT")
+    _ensure_column(conn, "articles", "article_image_url", "TEXT")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS article_jobs (
@@ -332,6 +334,7 @@ def _validate_postgres_schema(conn: PostgresConnection) -> None:
             "published_at",
             "summary",
             "content",
+            "article_image_url",
             "content_source",
             "status",
             "created_at",
