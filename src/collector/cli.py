@@ -16,7 +16,6 @@ from .settings import (
     DEFAULT_FEEDS_FILE,
     DEFAULT_LLM_CLEANUP_MODEL,
     DEFAULT_MIN_CRAWL_LEN,
-    DEFAULT_MIN_RSS_LEN,
     DEFAULT_SUMMARY_HEAD_CANDIDATES,
     DEFAULT_SUMMARY_MAX_ATTEMPTS,
     DEFAULT_SUMMARY_MAX_CANDIDATES,
@@ -46,7 +45,6 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--feeds-file", default=DEFAULT_FEEDS_FILE, help="JSON file of feed URLs")
     parser.add_argument("--feed", action="append", help="Extra feed URL or local file")
-    parser.add_argument("--min-rss-len", type=int, default=DEFAULT_MIN_RSS_LEN)
     parser.add_argument("--min-crawl-len", type=int, default=DEFAULT_MIN_CRAWL_LEN)
     parser.add_argument(
         "--crawl-batch-size",
@@ -216,7 +214,7 @@ def main() -> int:
                 # 실패한 피드의 부분 쓰기는 fetch_feed의 transaction() 블록이 이미 롤백하므로,
                 # 여기서는 로그만 남기고 다음 피드로 넘어간다.
                 try:
-                    count = fetch_feed(conn, feed_url, args.min_rss_len, offline=args.offline)
+                    count = fetch_feed(conn, feed_url, offline=args.offline)
                 except Exception as exc:
                     print(f"[warn] feed failed: {feed_url} ({exc})")
                     continue
