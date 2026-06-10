@@ -1,10 +1,12 @@
-"""이벤트 분류 파이프라인용 LLM 프롬프트 빌더.
-
-[경고] 기존 검증된 매칭 결과의 일관성을 유지하기 위해 내부 문자열 구조를 절대 변경하지 마십시오.
-"""
+"""이벤트 분류 파이프라인용 LLM 프롬프트 빌더"""
 
 def build_extract_main_event_prompt(article_text: str) -> str:
-    """기사 내 가장 중추적인 대표 사건(Main Event)을 추출하는 프롬프트"""
+    """
+    기사 내 가장 중추적인 대표 사건(Main Event)을 추출하는 프롬프트.
+    
+    기사의 대표 사건이 비교 이벤트에 따라 흔들리는 상황을 방지하고자 기사 단독으로 대표 사건을 먼저 추출한다.
+    """
+
     return f"""
 기사에서 가장 중요한 이벤트(main event)를 하나 추출하세요.
 
@@ -34,6 +36,7 @@ def build_extract_main_event_prompt(article_text: str) -> str:
 
 def build_verify_event_prompt(main_event: str, event_core_content: str) -> str:
     """추출된 대표 사건과 기존 이벤트 코어가 실질적으로 같은 사안인지 정밀 교차 검증하는 프롬프트"""
+
     return f"""
 대표 사건과 이벤트가 동일한 사건인지 판단하세요.
 
@@ -69,4 +72,21 @@ def build_verify_event_prompt(main_event: str, event_core_content: str) -> str:
 
 기존 이벤트 핵심 내용:
 {event_core_content}
+"""
+
+def build_generate_event_title_prompt(trimmed_content: str) -> str:
+    """핵심 사건 정보를 바탕으로 뉴스 서비스에 적합한 깔끔하고 명확한 이벤트 제목을 생성합니다."""
+    return f"""
+당신은 뉴스 서비스의 에디터입니다. 아래 제공된 '사건 정보'를 바탕으로, 해당 사건을 대표할 수 있는 명확하고 간결한 뉴스 이벤트 제목을 1줄로 생성하세요.
+
+[지침]
+1. 따옴표나 불필요한 수식어는 제외하고 제목만 담백하게 출력하세요.
+2. 20자 내외로 직관적이게 작성하세요.
+3. 출력 형식은 반드시 아래 JSON 포맷을 정확히 지켜야 합니다.
+
+[사건 정보]
+{trimmed_content}
+
+[출력 포맷]
+{{"event_title": "생성된 이벤트 제목"}}
 """
