@@ -139,42 +139,54 @@ ORDER BY distance ASC
 LIMIT ?
 """
 
-# 기존 이벤트 업데이트
-UPDATE_EVENT_DEADLINE_SQL = """
-UPDATE events 
-SET updated_at = ?, 
-    article_count = article_count + 1 
-WHERE id = ?
+UPDATE_EVENT_ABUSING_COUNT_SQL = """
+UPDATE events e
+SET left_count  = CASE WHEN (SELECT bias_type FROM articles WHERE id = ?) = '진보' THEN left_count  + 1 ELSE left_count  END,
+    mid_count   = CASE WHEN (SELECT bias_type FROM articles WHERE id = ?) = '중도' THEN mid_count   + 1 ELSE mid_count   END,
+    right_count = CASE WHEN (SELECT bias_type FROM articles WHERE id = ?) = '보수' THEN right_count + 1 ELSE right_count END
+WHERE e.id = ?
 """
 
 # 신규 이벤트 생성 (RETURNING id로 방금 생성된 id 획득)
 INSERT_NEW_EVENT_SQL = """
 INSERT INTO events (
     topic_id, category, title, summary, 
-    core_content, embedding_text, embedding, article_count
-) VALUES (NULL, ?::category, ?, ?, ?, ?, ?::vector, 1)
+    core_content, embedding_text, embedding, article_count, event_image_url
+) VALUES (NULL, ?::category, ?, ?, ?, ?, ?::vector, 0, ?)
 RETURNING id
 """
 
-# 기사-이벤트 관계 테이블 맵핑 삽입
+# 정상 기사용 관계 테이블 삽입 쿼리
 INSERT_EVENT_ARTICLE_MAP_SQL = """
 INSERT INTO event_articles (event_id, article_id, reason)
 VALUES (?, ?, ?)
 """
 
+# 어뷰징 기사용 전용 테이블 매핑 쿼리
+INSERT_ABUSING_ARTICLE_MAP_SQL = """
+INSERT INTO abusing_articles (event_id, article_id, type, reason)
+VALUES (?, ?, 'title_content_mismatch'::public.abusing_type, ?) 
+"""
+
 def search_candidate_events(conn, embedding: list[float], published_at_str: str, max_distance: float, top_k: int):
-    """유사한 후보 이벤트 목록을 검색합니다."""
+    """유사한 후보 이벤트 목록을 검색한다."""
     return conn.query(SEARCH_CANDIDATE_EVENTS_SQL, (embedding, published_at_str, embedding, max_distance, top_k))
 
-def update_event_deadline(conn, event_id: int, published_at_str: str):
-    """기존 이벤트의 데드라인 시간과 카운트를 갱신합니다."""
-    conn.execute(UPDATE_EVENT_DEADLINE_SQL, (published_at_str, event_id))
+def update_event_counters(conn, event_id: int, article_id: int, is_abusing: bool = False):
+    if is_abusing:
+        conn.execute(UPDATE_EVENT_ABUSING_COUNT_SQL, (article_id, article_id, article_id, event_id))
+    else:
+        pass
 
-def create_new_event(conn, category: str, title: str, summary: str, core_content: str, embedding_text: str, embedding: list[float]) -> int:
-    """새로운 이벤트를 개설하고 생성된 ID를 반환합니다."""
-    row = conn.query_one(INSERT_NEW_EVENT_SQL, (category, title, summary, core_content, embedding_text, embedding))
+def create_new_event(conn, category: str, title: str, summary: str, core_content: str, embedding_text: str, embedding: list[float], event_image_url: str | None = None) -> int:
+    """새로운 이벤트 개설 및 생성된 ID를 반환한다."""
+    row = conn.query_one(INSERT_NEW_EVENT_SQL, (category, title, summary, core_content, embedding_text, embedding, event_image_url))
     return row["id"]
+    
 
-def link_article_to_event(conn, event_id: int, article_id: int, reason: str):
-    """기사와 이벤트를 맵핑 테이블에 연결합니다."""
-    conn.execute(INSERT_EVENT_ARTICLE_MAP_SQL, (event_id, article_id, reason))
+def link_article_to_event(conn, event_id: int, article_id: int, reason: str, is_abusing: bool = False):
+    """어뷰징 여부에 따라 정상(event_articles) 혹은 어뷰징(abusing_articles) 테이블에 나누어 매핑한다."""
+    if is_abusing:
+        conn.execute(INSERT_ABUSING_ARTICLE_MAP_SQL, (event_id, article_id, reason))
+    else:
+        conn.execute(INSERT_EVENT_ARTICLE_MAP_SQL, (event_id, article_id, reason))
