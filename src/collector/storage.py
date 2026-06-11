@@ -549,56 +549,48 @@ def load_pending_ai_pipeline_jobs(conn, limit: int) -> list:
     )
 
 
-def save_article_ai_result(
+def save_article_analysis_result(
     conn,
     *,
     article_id: int,
+    summary: str,
     abuse_score: float,
     abuse_label: str,
+    keywords: str | None,
+    status: str = "done",
 ) -> None:
-    """article_ai_results에서 어뷰징 관련 필드만 저장한다."""
-    now = now_iso()
-    conn.execute(
-        """
-        INSERT INTO article_ai_results (
-            article_id,
-            abuse_score,
-            abuse_label,
-            created_at,
-            updated_at
-        ) VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(article_id) DO UPDATE SET
-            abuse_score = excluded.abuse_score,
-            abuse_label = excluded.abuse_label
-        """,
-        (
-            article_id,
-            abuse_score,
-            abuse_label,
-            now,
-            now,
-        ),
-    )
-
-
-def save_article_summary_result(conn, *, article_id: int, summary: str) -> None:
-    """article_ai_results에서 요약 필드만 저장한다."""
+    """LLM 기사 분석 결과 전체를 article_ai_results에 저장한다."""
     now = now_iso()
     conn.execute(
         """
         INSERT INTO article_ai_results (
             article_id,
             summary,
+            abuse_score,
+            abuse_label,
+            keywords,
+            status,
+            last_error,
             created_at,
             updated_at
-        ) VALUES (?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(article_id) DO UPDATE SET
             summary = excluded.summary,
+            abuse_score = excluded.abuse_score,
+            abuse_label = excluded.abuse_label,
+            keywords = excluded.keywords,
+            status = excluded.status,
+            last_error = excluded.last_error,
             updated_at = excluded.updated_at
         """,
         (
             article_id,
             summary,
+            abuse_score,
+            abuse_label,
+            keywords,
+            status,
+            None,
             now,
             now,
         ),

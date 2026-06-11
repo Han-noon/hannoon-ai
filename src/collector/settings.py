@@ -1,21 +1,23 @@
 import os
 
+from dotenv import load_dotenv
+
+
+# CLI 진입점보다 먼저 settings가 import될 수 있으므로 여기서 .env를 선로딩한다.
+load_dotenv(override=True)
+
 DEFAULT_DB = os.path.join("data", "news.db")
 DEFAULT_FEEDS_FILE = os.path.join("config", "feeds.json")
 DEFAULT_MIN_CRAWL_LEN = 400
 DEFAULT_CRAWL_BATCH_SIZE = 20
 DEFAULT_AI_BATCH_SIZE = 20
-DEFAULT_CLASSIFY_MAX_ATTEMPTS = 3
-DEFAULT_SUMMARY_MAX_ATTEMPTS = 3
-DEFAULT_SUMMARY_SENTENCES = 3
-DEFAULT_SUMMARY_MAX_CANDIDATES = 80
-DEFAULT_SUMMARY_HEAD_CANDIDATES = 50
-DEFAULT_SUMMARY_MIDDLE_CANDIDATES = 15
-DEFAULT_SUMMARY_TAIL_CANDIDATES = 15
+DEFAULT_ANALYSIS_MAX_ATTEMPTS = 3
 DEFAULT_DOMAIN_DELAY = 2.0
-DEFAULT_LLM_CLEANUP_MODEL = "gpt-4.1-mini"
-DEFAULT_ABUSE_P1_MODEL_DIR = os.path.join("models", "clickbait-classifier")
-DEFAULT_ABUSE_P2_MODEL_DIR = os.path.join("models", "topic-mismatch-detector")
-DEFAULT_SUMMARY_MODEL_PATH = os.path.join("models", "summary", "bertsum_ext_model.pt")
-DEFAULT_SUMMARY_TOKENIZER_DIR = os.path.join("models", "summary")
+
+DEFAULT_LLM_MODEL = os.environ.get("LLM_DEFAULT_MODEL", "solar-mini")
+DEFAULT_LLM_CLEANUP_MODEL = os.environ.get("LLM_CLEANUP_MODEL", DEFAULT_LLM_MODEL)
+DEFAULT_LLM_ARTICLE_MODEL = os.environ.get("LLM_ARTICLE_MODEL", DEFAULT_LLM_MODEL)
+DEFAULT_LLM_ABUSE_MODEL = os.environ.get("LLM_ABUSE_MODEL", DEFAULT_LLM_ARTICLE_MODEL)
+DEFAULT_LLM_SUMMARY_MODEL = os.environ.get("LLM_SUMMARY_MODEL", DEFAULT_LLM_ARTICLE_MODEL)
+
 USER_AGENT = "NoiseFreeRSSBot/0.1 (+https://example.invalid)"

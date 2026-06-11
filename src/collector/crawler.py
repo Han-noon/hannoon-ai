@@ -77,6 +77,7 @@ def crawl_articles(
         raise ValueError("crawl_batch_size must be greater than 0.")
 
     cleaner = text_cleaner
+    external_cleaner = text_cleaner is not None
     last_hit: dict[str, float] = {}
     updated = 0
     batch_no = 0
@@ -126,10 +127,10 @@ def crawl_articles(
                 finished_in_batch += 1
                 continue
 
-            if text and (llm_cleanup or cleaner is not None):
+            if text and (llm_cleanup or external_cleaner):
                 needs_cleanup, cleanup_reasons = should_llm_cleanup(text)
-                if needs_cleanup:
-                    reason_text = "; ".join(cleanup_reasons)
+                if external_cleaner or needs_cleanup:
+                    reason_text = "; ".join(cleanup_reasons) if needs_cleanup else "external_cleaner"
                     print(f"[cleanup] article={article_id} link={link} -> using LLM ({reason_text})")
                     try:
                         if cleaner is None:
