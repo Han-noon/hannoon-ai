@@ -1,8 +1,4 @@
-"""토픽 분류 파이프라인 CLI.
-
-collector.cli와 동일한 형식으로, settings의 상수를 명령행 인자로 노출한다.
-토픽 분류는 pgvector가 필요하므로 Postgres 연결(--database-url 또는 DATABASE_URL)이 필수다.
-"""
+from __future__ import annotations
 
 import argparse
 import os
@@ -13,51 +9,44 @@ from dotenv import load_dotenv
 from collector.settings import DEFAULT_DB
 from collector.storage import ensure_db
 from topic_classifier.pipeline import run
-from topic_classifier.settings import (
-    BATCH_SIZE,
-    LLM_MODEL,
-    MIN_NET_ARTICLE_COUNT,
-    TOP_K,
-)
+from topic_classifier.settings import BATCH_SIZE, LLM_MODEL, MIN_NET_ARTICLE_COUNT, TOP_K
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """명령행 파서를 구성한다. 기본값은 settings의 상수를 사용한다."""
-    parser = argparse.ArgumentParser(description="미배정 이벤트를 토픽에 배정하는 분류 파이프라인")
+    parser = argparse.ArgumentParser(description="LLM으로 미분류 이벤트를 토픽에 배정")
     parser.add_argument(
         "--database-url",
         default=os.environ.get("DATABASE_URL"),
-        help="Postgres/Supabase database URL. Defaults to DATABASE_URL env var",
+        help="Postgres/Supabase DB URL. 기본값은 DATABASE_URL 환경 변수",
     )
     parser.add_argument(
         "--min-net-article-count",
         type=int,
         default=MIN_NET_ARTICLE_COUNT,
-        help="실제 기사 수((article_count - abusing_count)) 최소값. 미달 이벤트는 분류 제외",
+        help="토픽 배정 대상이 되기 위한 최소 정상 기사 수",
     )
     parser.add_argument(
         "--batch-size",
         type=int,
         default=BATCH_SIZE,
-        help="한 번의 실행에서 처리할 최대 이벤트 수",
+        help="한 번에 처리할 최대 이벤트 수",
     )
     parser.add_argument(
         "--top-k",
         type=int,
         default=TOP_K,
-        help="토픽 후보 검색 시 반환할 최대 토픽 수",
+        help="LLM에 보여줄 최대 토픽 후보 수",
     )
     parser.add_argument(
         "--llm-model",
         default=LLM_MODEL,
-        help="cause/result 추출·배정·최신화에 사용할 LLM 모델",
+        help="토픽 배정에 사용할 LLM 모델",
     )
     return parser
 
 
 def main() -> int:
-    """CLI 인자를 해석하고 토픽 분류 파이프라인을 실행한다."""
-    load_dotenv()
+    load_dotenv(override=True)
     args = build_parser().parse_args()
 
     if args.min_net_article_count < 0:
