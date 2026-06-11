@@ -1,145 +1,164 @@
-# 한눈 RSS Collector
+# Hannoon AI
 
-RSS 피드에서 기사 항목을 수집해 SQLite에 저장하고, 모든 신규 기사 원문 페이지를 크롤링해 본문과 기사 이미지를 확보하는 수집기입니다. 이후 욕설/악성 콘텐츠 탐지, 요약, 분류 같은 AI 처리 단계로 넘길 데이터를 준비하는 용도로 사용할 수 있습니다.
+RSS 뉴스 기사를 수집하고, 원문을 크롤링한 뒤 Upstage LLM과 임베딩으로 기사 분석,
+이벤트 묶기, 토픽 묶기를 수행하는 파이프라인입니다.
 
-## 프로젝트 구조
+현재 기본 전략은 비용과 품질을 나눠 쓰는 방식입니다.
 
-- `main.py`: CLI 진입점
-- `src/collector/`: RSS 수집, 원문 크롤링, 저장소 처리 코드
-- `config/feeds.json`: 수집할 RSS 피드 목록
-- `data/`: 실행 중 생성되는 SQLite 데이터베이스 저장 위치
-- `requirements.txt`: 실행에 필요한 Python 패키지 목록
+- 기사 본문 정제, 요약, 어뷰징 판단, 키워드 추출: `solar-mini`
+- 이벤트/토픽 배정처럼 장기 데이터 구조에 영향을 주는 판단: `solar-pro3`
+- 후보 검색용 임베딩: Upstage `solar-embedding-1-large-query`
+- DB 저장용 임베딩: Upstage `solar-embedding-1-large-passage`
 
-## 빠른 시작
+## 전체 흐름
+
+```text
+RSS 수집
+-> 기사 원문 크롤링
+-> 필요한 경우에만 LLM 본문 정제
+-> LLM 요약 + 어뷰징 판단 + 키워드 추출
+-> 기사 앞부분 query 임베딩
+-> Supabase pgvector로 기존 이벤트 후보 검색
+-> solar-pro3로 기존 이벤트 배정 또는 새 이벤트 생성
+-> 이벤트 cause/result 추출
+-> cause query 임베딩으로 기존 토픽 후보 검색
+-> solar-pro3로 기존 토픽 배정 또는 새 토픽 생성
+-> passage 임베딩 저장
+```
+
+후보 검색 결과가 하나도 없으면 `solar-pro3` 배정 판단 호출을 생략하고 바로 새
+이벤트/토픽을 만듭니다. 후보가 있을 때만 고급 모델로 판단합니다.
+
+## 설치
 
 ```powershell
 python -m pip install -r requirements.txt
-python main.py run
+copy .env.example .env
 ```
 
-## 피드 설정
+`.env`에 최소한 아래 값을 설정합니다.
 
-`config/feeds.json` 파일에 수집할 RSS 주소를 등록합니다.
-
-```json
-{
-  "feeds": [
-    "https://www.chosun.com/arc/outboundfeeds/rss/category/politics/?outputType=xml"
-  ]
-}
+```env
+UPSTAGE_API_KEY=your_upstage_api_key
+LLM_BASE_URL=https://api.upstage.ai/v1
+DATABASE_URL=your_postgres_database_url
 ```
 
-명령줄에서 피드를 직접 추가할 수도 있습니다. 공통 옵션은 하위 명령어보다 앞에 둡니다.
+## 권장 모델 설정
 
-```powershell
-python main.py --feed https://feeds.bbci.co.uk/news/rss.xml run
+```env
+LLM_DEFAULT_MODEL=solar-mini
+LLM_CLEANUP_MODEL=solar-mini
+LLM_ARTICLE_MODEL=solar-mini
+LLM_ABUSE_MODEL=solar-mini
+LLM_SUMMARY_MODEL=solar-mini
+
+LLM_TOPIC_EVENT_MODEL=solar-pro3
+LLM_EVENT_MODEL=solar-pro3
+LLM_TOPIC_MODEL=solar-pro3
+
+EMBEDDING_MODEL=solar-embedding-1-large-passage
+EMBEDDING_PASSAGE_MODEL=solar-embedding-1-large-passage
+EMBEDDING_QUERY_MODEL=solar-embedding-1-large-query
+EMBEDDING_DIMENSIONS=4096
 ```
 
-## 실행 명령
+본문 전체를 자주 넣는 작업은 `solar-mini`로 두고, 이벤트/토픽 배정처럼 잘못되면
+DB 구조가 오래 꼬이는 판단만 `solar-pro3`를 사용합니다.
 
-- `fetch`: RSS 항목만 수집해 저장합니다.
-- `crawl`: 원문 크롤링이 필요한 기사만 처리합니다.
-- `process`: 본문이 준비된 기사에 대해 어뷰징 분류 후 정상 기사만 요약합니다.
-- `run`: RSS 수집, 원문 크롤링, 어뷰징 분류, 정상 기사 요약까지 실행합니다. 명령을 생략하면 기본값으로 `run`이 실행됩니다.
+## 실행
 
-## 주요 옵션
-
-- `--db`: SQLite 데이터베이스 경로입니다. 기본값은 `data/news.db`입니다.
-- `--database-url`: Supabase/Postgres 연결 URL입니다. 지정하지 않으면 `DATABASE_URL` 환경변수를 사용하고, 둘 다 없으면 SQLite를 사용합니다.
-- `--feeds-file`: RSS 피드 목록 JSON 파일 경로입니다. 기본값은 `config/feeds.json`입니다.
-- `--feed`: 추가 RSS 피드 URL 또는 로컬 피드 파일 경로입니다. 여러 번 지정할 수 있습니다.
-- `--min-crawl-len`: 크롤링한 본문을 유효한 기사 본문으로 인정할 최소 길이입니다.
-- `--crawl-batch-size`: 한 번에 DB에서 가져와 처리할 크롤링 배치 크기입니다. `needs_crawl` 기사가 남아 있으면 다음 배치를 계속 처리합니다. 기본값은 `20`입니다.
-- `--llm-cleanup`: 크롤링한 본문이 광고/구독 유도/관련기사 문구 등으로 의심될 때만 LLM으로 정제합니다.
-- `--llm-cleanup-model`: `--llm-cleanup`에 사용할 OpenAI 모델입니다. 기본값은 `gpt-4.1-mini`입니다.
-- `--domain-delay`: 같은 도메인에 연속 요청할 때 기다릴 시간(초)입니다.
-- `--offline`: HTTP/HTTPS 요청을 건너뜁니다. 로컬 피드 파일 테스트에 사용할 수 있습니다.
-
-## 데이터베이스 사용
-
-로컬 개발과 테스트는 기본 SQLite를 사용합니다.
+전체 기사 수집/크롤링/분석:
 
 ```powershell
 python main.py run
 ```
 
-운영 환경에서는 Supabase Postgres 연결 URL을 넘깁니다. Supabase/Postgres 스키마는 이 수집기 코드에서 생성하지 않고, 운영 DB의 migration 관리 흐름에서 별도로 준비합니다.
+단계별 실행:
 
 ```powershell
-$env:DATABASE_URL="postgresql://..."
-python main.py run
-```
-
-또는 명령줄 옵션으로 직접 지정할 수 있습니다.
-
-```powershell
-python main.py --database-url "postgresql://..." run
-```
-
-Supabase/Postgres에서 필요한 테이블이나 컬럼이 없으면 앱은 DDL을 실행하지 않고 에러를 냅니다.
-
-`data/*.db`, `.env`, Python 캐시 파일은 Git에 올리지 않습니다.
-
-## SQLite 출력
-
-`articles.status` 값:
-
-- `needs_crawl`: RSS에서 수집된 신규 기사이며 원문 크롤링이 필요합니다.
-- `ready`: 사용할 수 있는 본문이 준비되었습니다.
-- `crawl_failed`: 크롤링이 실패했거나 크롤링한 본문이 너무 짧습니다.
-
-`articles.category` 값:
-
-- RSS 피드 URL과 피드 제목을 기준으로 자동 분류됩니다.
-- 기본 분류값은 `politics`, `economy`, `society`, `international`, `other`입니다.
-
-`articles.publisher` 값:
-
-- RSS 피드 URL과 피드 제목을 기준으로 추론한 언론사 이름입니다.
-- 예: `조선일보`, `JTBC`, `한겨레`, `연합뉴스`
-
-`articles.bias_type` 값:
-
-- 기사 내용의 AI 판정값이 아니라 언론사 이름 기준으로 매핑한 성향값입니다.
-- 현재 값은 `right`, `left`, `mid` 세 가지만 사용합니다.
-
-`article_jobs` 테이블:
-
-- `status`: 후속 처리 상태입니다. `pending`, `sent`, `failed` 값을 사용할 수 있습니다.
-- `attempts`: 후속 처리 시도 횟수입니다.
-- `last_error`: 마지막 실패 메시지입니다.
-- `last_attempt_at`: 마지막 후속 처리 시각입니다.
-
-## AI 후속 처리 작업
-
-크롤링으로 본문이 준비된 기사(`ready`)를 `article_jobs` 큐에서 가져와 기사 단위로 어뷰징 분류 후 정상 기사만 바로 요약합니다.
-
-- `models/clickbait-classifier`: 낚시성 기사 분류 모델
-- `models/topic-mismatch-detector`: 본문 주제분리 탐지 모델
-- 두 모델 중 하나라도 `abuse`면 최종 `abuse`, 둘 다 `normal`이면 최종 `normal`
-- `--ai-batch-size`는 전체 개수 제한이 아니라 한 번에 가져올 AI 처리 배치 크기입니다. 기본값은 `20`입니다.
-- `article_ai_results`에서는 `abuse_score`, `abuse_label`만 저장/수정합니다.
-- `abuse` 기사는 요약하지 않고 `sent` 처리하며, `normal` 기사는 즉시 요약 후 `sent` 처리합니다.
-- 저장 성공 후 `abuse_result=saved`, `summary=saved`, `job_status=sent` 로그가 출력됩니다.
-
-실행:
-
-```bash
+python main.py fetch
+python main.py crawl
 python main.py process
 ```
 
-## 정상 기사 요약 작업
+이벤트 분류:
 
-요약은 `process` 또는 `run` 안에서 정상 기사에 대해 이어서 실행됩니다.
-
-- `models/summary/bertsum_ext_model.pt`: KLUE BERT 기반 추출형 요약 모델
-- 긴 기사는 본문 전체를 한 번에 넣지 않고 앞/중간/끝 문장을 나눠 점수화한 뒤 상위 문장을 뽑습니다.
-- `article_ai_results`에서는 `summary`만 저장/수정합니다.
-
-실행:
-
-```bash
-python main.py run
+```powershell
+python classify_events.py --database-url "postgresql://..."
 ```
 
-모델 weight는 Git에 올리지 않고 `models/` 아래에 별도로 배치합니다.
+토픽 분류:
+
+```powershell
+python classify_topics.py --database-url "postgresql://..."
+```
+
+주요 옵션:
+
+- `--no-llm-cleanup`: 크롤링 본문 LLM 정제를 끕니다.
+- `--llm-cleanup-model`: 본문 정제 모델을 지정합니다.
+- `--llm-abuse-model`: 어뷰징 판단 모델을 지정합니다.
+- `--llm-summary-model`: 요약/키워드 모델을 지정합니다.
+- `--ai-batch-size`: 한 번에 LLM 분석할 기사 수입니다.
+- `--analysis-max-attempts`: 기사 분석 실패 확정 전 재시도 횟수입니다.
+- `--batch-size`: 이벤트/토픽 분류 배치 크기입니다.
+- `--top-k`: LLM에 보여줄 후보 수입니다.
+
+## 데이터베이스 주의사항
+
+로컬 SQLite는 RSS 수집, 크롤링, 기사 분석 개발용입니다. 이벤트/토픽 분류는
+Supabase/Postgres와 pgvector가 필요합니다.
+
+Upstage 대형 임베딩은 4096차원입니다. 임베딩을 저장하는 pgvector 컬럼은
+`vector(4096)`이어야 합니다.
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+
+ALTER TABLE articles DROP COLUMN IF EXISTS embedding;
+ALTER TABLE articles ADD COLUMN embedding vector(4096);
+
+ALTER TABLE events DROP COLUMN IF EXISTS embedding;
+ALTER TABLE events ADD COLUMN embedding vector(4096);
+
+ALTER TABLE topic_causes DROP COLUMN IF EXISTS cause_embedding;
+ALTER TABLE topic_causes ADD COLUMN cause_embedding vector(4096);
+```
+
+기존 768차원 로컬 임베딩과 Upstage 4096차원 임베딩은 서로 비교할 수 없습니다.
+스키마를 바꾼 뒤에는 기존 저장 벡터를 다시 생성해야 합니다.
+
+운영 DB에는 최소한 다음 테이블이 준비되어 있어야 합니다.
+
+- `feeds`
+- `articles`
+- `article_jobs`
+- `article_ai_results`
+- `events`
+- `topics`
+- `topic_causes`
+- `event_articles`
+- `abusing_articles`
+
+현재 애플리케이션은 운영 DB에서 테이블을 자동 생성하지 않습니다. Supabase
+migration에서 스키마를 먼저 적용한 뒤 실행해야 합니다.
+
+## 비용을 줄이는 동작
+
+- 크롤링 본문 LLM 정제는 광고, 공유 UI, 저작권 문구 등 정제 흔적이 있을 때만 호출합니다.
+- 이벤트/토픽 후보가 없으면 `solar-pro3` 배정 판단을 생략하고 바로 새 항목을 만듭니다.
+- 기사 분석에서 어뷰징 판단 모델과 요약 모델이 같으면 한 번의 LLM 호출로 요약,
+  어뷰징 판단, 키워드 추출을 함께 처리합니다.
+
+## 주요 파일
+
+- `main.py`: RSS 수집/크롤링/기사 분석 CLI 진입점
+- `classify_events.py`: 기사에서 이벤트를 배정하거나 생성하는 CLI 진입점
+- `classify_topics.py`: 이벤트를 토픽에 배정하거나 생성하는 CLI 진입점
+- `src/collector/`: RSS 수집, 크롤링, 기사 LLM 분석
+- `src/event_classifier/`: 이벤트 추출과 이벤트 배정
+- `src/topic_classifier/`: 토픽 배정과 토픽 cause/result 누적
+- `src/db/`: Postgres/Supabase repository 함수
+- `src/embedding.py`: Upstage Embedding API 래퍼
+- `src/openai_client/`: Upstage/OpenAI 호환 Chat Completions 클라이언트
