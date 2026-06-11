@@ -1,0 +1,107 @@
+{
+  "feeds": [
+    "https://www.chosun.com/arc/outboundfeeds/rss/category/politics/?outputType=xml",
+    "https://www.chosun.com/arc/outboundfeeds/rss/category/economy/?outputType=xml",
+    "https://www.chosun.com/arc/outboundfeeds/rss/category/national/?outputType=xml",
+    "https://www.chosun.com/arc/outboundfeeds/rss/category/international/?outputType=xml",
+
+
+    "https://www.yonhapnewstv.co.kr/category/news/politics/feed/",
+    "https://www.yonhapnewstv.co.kr/category/news/economy/feed/",
+    "https://www.yonhapnewstv.co.kr/category/news/society/feed/",
+    "https://www.yonhapnewstv.co.kr/category/news/international/feed/",
+
+    "https://www.mk.co.kr/rss/30200030/",
+    "https://www.mk.co.kr/rss/30100041/",
+    "https://www.mk.co.kr/rss/50400012/",
+    "https://www.mk.co.kr/rss/30300018/",
+    "https://www.mk.co.kr/rss/50100032/",
+    "https://www.mk.co.kr/rss/50200011/",
+
+    "https://www.khan.co.kr/rss/rssdata/politic_news.xml",
+    "https://www.khan.co.kr/rss/rssdata/economy_news.xml",
+    "https://www.khan.co.kr/rss/rssdata/society_news.xml",
+    "https://www.khan.co.kr/rss/rssdata/kh_world.xml",
+
+    "https://www.kmib.co.kr/rss/data/kmibPolRss.xml",
+    "https://www.kmib.co.kr/rss/data/kmibEcoRss.xml",
+    "https://www.kmib.co.kr/rss/data/kmibSocRss.xml",
+    "https://www.kmib.co.kr/rss/data/kmibIntRss.xml",
+
+    "https://www.newsis.com/RSS/politics.xml",
+    "https://www.newsis.com/RSS/international.xml",
+    "https://www.newsis.com/RSS/economy.xml",
+    "https://www.newsis.com/RSS/society.xml",
+
+    "https://rss.donga.com/politics.xml",
+    "https://rss.donga.com/national.xml",
+    "https://rss.donga.com/economy.xml",
+    "https://rss.donga.com/international.xml",
+
+    "https://www.mediatoday.co.kr/rss/S1N2.xml",
+    "https://www.mediatoday.co.kr/rss/S1N3.xml",
+    "https://www.mediatoday.co.kr/rss/S1N4.xml",
+    "https://www.mediatoday.co.kr/rss/S1N6.xml",
+
+    "https://www.seoulnews.org/rss/politics-society",
+    "https://www.seoulnews.org/rss/economy-industry",
+
+    "https://www.segye.com/Articles/RSSList/segye_politic.xml",
+    "https://www.segye.com/Articles/RSSList/segye_economy.xml",
+    "https://www.segye.com/Articles/RSSList/segye_society.xml",
+    "https://www.segye.com/Articles/RSSList/segye_international.xml",
+
+    "https://www.sisajournal.com/rss/S1N47.xml",
+    "https://www.sisajournal.com/rss/S1N54.xml",
+    "https://www.sisajournal.com/rss/S1N58.xml",
+    "https://www.sisajournal.com/rss/S1N59.xml",
+
+    "https://www.ablenews.co.kr/rss/S1N3.xml",
+    "https://www.ablenews.co.kr/rss/S1N4.xml",
+    "https://www.ablenews.co.kr/rss/S1N11.xml",
+
+
+    "https://www.womennews.co.kr/rss/S1N1.xml",
+    "https://www.womennews.co.kr/rss/S1N2.xml",
+    "https://www.womennews.co.kr/rss/S1N3.xml",
+    "https://www.womennews.co.kr/rss/S1N4.xml",
+
+    "https://www.pressian.com/api/v3/site/rss/section/65",
+    "https://www.pressian.com/api/v3/site/rss/section/66",
+    "https://www.pressian.com/api/v3/site/rss/section/67",
+    "https://www.pressian.com/api/v3/site/rss/section/68",
+
+    "https://www.hani.co.kr/rss/politics/",
+    "https://www.hani.co.kr/rss/economy/",
+    "https://www.hani.co.kr/rss/society/",
+    "https://www.hani.co.kr/rss/international/",
+
+    "https://news-ex.jtbc.co.kr/v1/get/rss/section/politics",
+    "https://news-ex.jtbc.co.kr/v1/get/rss/section/economy",
+    "https://news-ex.jtbc.co.kr/v1/get/rss/section/society",
+    "https://news-ex.jtbc.co.kr/v1/get/rss/section/international",
+
+
+    "https://news.sbs.co.kr/news/SectionRssFeed.do?sectionId=01&plink=RSSREADER",
+    "https://news.sbs.co.kr/news/SectionRssFeed.do?sectionId=02&plink=RSSREADER",
+    "https://news.sbs.co.kr/news/SectionRssFeed.do?sectionId=03&plink=RSSREADER",
+    "https://news.sbs.co.kr/news/SectionRssFeed.do?sectionId=07&plink=RSSREADER",
+
+    "https://rss.etoday.co.kr/eto/industry_news.xml",
+    "https://rss.etoday.co.kr/eto/economy_news.xml",
+    "https://rss.etoday.co.kr/eto/global_news.xml",
+    "https://rss.etoday.co.kr/eto/politics_news.xml",
+    "https://rss.etoday.co.kr/eto/society_news.xml",
+
+    "https://www.asiae.co.kr/rss/economy.htm",
+    "https://www.asiae.co.kr/rss/politics.htm",
+    "https://www.asiae.co.kr/rss/society.htm",
+    "https://www.asiae.co.kr/rss/world.htm",
+
+    "https://www.mbn.co.kr/rss/politics/",
+    "https://www.mbn.co.kr/rss/economy/",
+    "https://www.mbn.co.kr/rss/society/",
+    "https://www.mbn.co.kr/rss/international/"
+  ]
+}
+

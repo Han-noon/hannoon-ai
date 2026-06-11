@@ -1,1 +1,14 @@
 .idea/
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.env
+logs/
+data/*.db
+data/*.db-shm
+data/*.db-wal
+팀프로젝트 제안서_김민재_22112043.pdf
+models/*
+!models/README.md
