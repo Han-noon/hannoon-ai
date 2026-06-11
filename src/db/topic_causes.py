@@ -1,20 +1,17 @@
-"""topic_causes 테이블 repository.
+from __future__ import annotations
 
-토픽 후보 검색(코사인 유사도)과 원인 데이터 누적 함수, SQL 상수를 제공한다.
-"""
-
-from dataclasses import dataclass, field
 from collections import OrderedDict
+from dataclasses import dataclass, field
 
 
 @dataclass
 class TopicCandidate:
-    """토픽 후보 1건. 동일 topic_id에 매칭된 cause_text를 목록으로 묶는다."""
+    """원인/결과 임베딩 검색으로 찾은 토픽 후보."""
+
     topic_id: int
     title: str
     summary: str
-    # 한 토픽이 여러 cause_text로 매칭될 수 있으므로 리스트로 수집한다.
-    cause_texts: list = field(default_factory=list)
+    cause_texts: list[str] = field(default_factory=list)
 
 
 # ── SQL 상수 ────────────────────────────────────────────────────────────────
@@ -24,7 +21,7 @@ class TopicCandidate:
 # 벡터 바인딩은 '[f1,f2,...]' 문자열 + ?::vector 캐스트 방식을 사용한다.
 # (storage.py의 PostgresConnection이 register_vector를 호출하지 않으므로)
 SEARCH_SQL = """
-SELECT t.id    AS topic_id,
+SELECT t.id AS topic_id,
        t.title AS topic_title,
        t.summary AS topic_summary,
        tc.cause_text
@@ -45,43 +42,28 @@ VALUES (?, ?, ?::vector)
 """
 
 
-# ── Repository 함수 ─────────────────────────────────────────────────────────
-
-def search_candidates(
-    conn,
-    embedding_literal: str,
-    top_k: int,
-) -> list[TopicCandidate]:
-    """원인 임베딩 코사인 거리로 토픽 후보 top-k를 검색한다.
-
-    동일 topic_id가 여러 cause_text로 매칭될 수 있으므로
-    토픽 단위로 그룹화해 반환한다(거리 오름차순 보존).
-
-    embedding_literal: to_vector_literal()로 직렬화한 '[f1,f2,...]' 문자열.
-    """
+def search_candidates(conn, embedding_literal: str, top_k: int) -> list[TopicCandidate]:
+    """원인 임베딩과 가까운 topic_causes를 찾아 토픽 단위 후보로 묶는다."""
+    if top_k <= 0:
+        raise ValueError("top_k must be greater than 0.")
     rows = conn.query(SEARCH_SQL, (embedding_literal, top_k))
 
-    # 거리 오름차순(쿼리 정렬 순서)을 유지하면서 topic_id 단위로 그룹화한다.
     seen: OrderedDict[int, TopicCandidate] = OrderedDict()
     for row in rows:
-        tid = row["topic_id"]
-        if tid not in seen:
-            seen[tid] = TopicCandidate(
-                topic_id=tid,
+        topic_id = row["topic_id"]
+        if topic_id not in seen:
+            seen[topic_id] = TopicCandidate(
+                topic_id=topic_id,
                 title=row["topic_title"],
                 summary=row["topic_summary"],
                 cause_texts=[row["cause_text"]],
             )
         else:
-            seen[tid].cause_texts.append(row["cause_text"])
+            seen[topic_id].cause_texts.append(row["cause_text"])
 
     return list(seen.values())
 
 
 def add_cause(conn, topic_id: int, cause_text: str, embedding_literal: str) -> None:
-    """이벤트의 결과(result)를 topic_causes에 적재한다. 트랜잭션 내에서 호출한다.
-
-    cause_text 파라미터에 이벤트의 'result'를 전달한다(D4 설계 결정 참고).
-    embedding_literal: to_vector_literal()로 직렬화한 '[f1,f2,...]' 문자열.
-    """
+    """토픽 검색에 재사용할 원인/결과 문장과 임베딩을 저장한다."""
     conn.execute(INSERT_CAUSE_SQL, (topic_id, cause_text, embedding_literal))

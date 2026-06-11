@@ -13,11 +13,7 @@ dependencies = [
     "psycopg[binary]==3.2.3",
     "openai>=1.0.0",
     "python-dotenv>=1.0.0",
-    "sentence-transformers>=2.0.0",
-    "torch>=2.2.0",
-    "transformers>=4.41.0",
-    "safetensors>=0.4.3",
 ]
 
 [tool.setuptools.packages.find]
-where = ["src"]  # src layout: 패키지 루트를 src/ 디렉토리로 지정
+where = ["src"]

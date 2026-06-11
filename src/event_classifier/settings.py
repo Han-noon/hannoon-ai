@@ -1,7 +1,15 @@
-"""이벤트 분류 파이프라인 설정 상수."""
+import os
 
-BATCH_SIZE = 5         # 한 번의 루프에서 처리할 기사 개수
-TOP_K = 4              # 정밀 비교할 벡터 후보군 개수
-DISTANCE_THRESHOLD = 0.2  # 벡터 최대 거리 (1 - 0.8 유사도)
-FINAL_THRESHOLD = 0.8   # LLM + 벡터 융합 최종 통과 점수
-LLM_MODEL = "gpt-4.1-mini"
+from dotenv import load_dotenv
+
+
+# classify_events.py가 pipeline을 import하는 순간 설정이 평가되므로 .env를 먼저 읽는다.
+load_dotenv(override=True)
+
+BATCH_SIZE = int(os.environ.get("EVENT_BATCH_SIZE", "5"))
+TOP_K = int(os.environ.get("EVENT_CANDIDATE_LIMIT", "12"))
+DISTANCE_THRESHOLD = float(os.environ.get("EVENT_DISTANCE_THRESHOLD", "1.0"))
+LLM_MODEL = os.environ.get(
+    "LLM_EVENT_MODEL",
+    os.environ.get("LLM_TOPIC_EVENT_MODEL", os.environ.get("LLM_DEFAULT_MODEL", "solar-mini")),
+)

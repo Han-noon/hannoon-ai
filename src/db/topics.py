@@ -15,8 +15,6 @@ class Topic:
     summary: str
 
 
-# ── SQL 상수 ────────────────────────────────────────────────────────────────
-
 # 새 토픽을 삽입하고 생성된 id를 반환한다.
 # category는 public.category enum 타입이므로 ?::category 캐스트가 필요하다.
 # PostgresCursor의 자동 RETURNING id 처리는 'INSERT INTO ARTICLES'에만 적용되므로,
@@ -31,8 +29,6 @@ RETURNING id
 # updated_at은 DB 트리거가 처리하므로 여기서 다루지 않는다.
 UPDATE_TOPIC_SQL = "UPDATE topics SET title = ?, summary = ? WHERE id = ?"
 
-
-# ── Repository 함수 ─────────────────────────────────────────────────────────
 
 def create_topic(conn, category: str, title: str, summary: str) -> int:
     """새 토픽을 생성하고 생성된 id를 반환한다. 트랜잭션 내에서 호출한다."""
