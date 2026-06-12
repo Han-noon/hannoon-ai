@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 from .article_llm import ArticleLLMAnalyzer
 from .storage import (
     load_pending_ai_pipeline_jobs,
@@ -101,7 +99,7 @@ def process_pending_articles(
                     summary=result.summary,
                     abuse_score=result.abuse_score,
                     abuse_label=result.abuse_label,
-                    keywords=json.dumps(result.keywords, ensure_ascii=False),
+                    keywords=result.keywords,
                     status="done",
                 )
                 mark_article_job_sent(conn, job_id)

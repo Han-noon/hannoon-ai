@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -556,11 +557,12 @@ def save_article_analysis_result(
     summary: str,
     abuse_score: float,
     abuse_label: str,
-    keywords: str | None,
+    keywords: list[str] | str | None,
     status: str = "done",
 ) -> None:
     """LLM 기사 분석 결과 전체를 article_ai_results에 저장한다."""
     now = now_iso()
+    stored_keywords = _adapt_keywords_for_storage(conn, keywords)
     conn.execute(
         """
         INSERT INTO article_ai_results (
@@ -588,13 +590,40 @@ def save_article_analysis_result(
             summary,
             abuse_score,
             abuse_label,
-            keywords,
+            stored_keywords,
             status,
             None,
             now,
             now,
         ),
     )
+
+
+def _adapt_keywords_for_storage(conn, keywords: list[str] | str | None):
+    """Store keywords as text[] in Postgres and JSON text in local SQLite."""
+    if keywords is None:
+        return None
+
+    if isinstance(keywords, str):
+        try:
+            parsed = json.loads(keywords)
+        except json.JSONDecodeError:
+            parsed = [keywords] if keywords.strip() else []
+    else:
+        parsed = keywords
+
+    if isinstance(parsed, list):
+        normalized = [
+            " ".join(str(item).split())
+            for item in parsed
+            if " ".join(str(item).split())
+        ]
+    else:
+        normalized = []
+
+    if isinstance(conn, PostgresConnection):
+        return normalized
+    return json.dumps(normalized, ensure_ascii=False)
 
 
 def mark_article_job_sent(conn, job_id: int) -> None:
