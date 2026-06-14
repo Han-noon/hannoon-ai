@@ -180,7 +180,6 @@ def process_event_classification(
             img_url = art["article_image_url"]
             ai_summary = str(art["ai_summary"] or "").strip()
             abuse_label = art["abuse_label"]
-            summary = art["summary"] or ""
             is_abusing = abuse_label == "abuse"
 
             trimmed_content = _get_first_sentences(full_content)
