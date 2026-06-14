@@ -10,7 +10,11 @@ from topic_classifier.prompts import (
     build_topic_cause_result_prompt,
     build_topic_update_prompt,
 )
-from topic_classifier.settings import LLM_MODEL
+from topic_classifier.settings import (
+    ASSIGN_SCORE_THRESHOLD,
+    DISTANCE_THRESHOLD,
+    LLM_MODEL,
+)
 
 
 _client: LLMClient | None = None
@@ -28,6 +32,34 @@ def _call_json(client: LLMClient, prompt: str, required_keys: set[str]) -> dict:
     """LLM에 JSON 응답을 요청하고 필수 키를 검증한다."""
     data = client.request_json(prompt, required_keys=required_keys, temperature=0)
     return data
+
+
+def _reason_rejects_assignment(reason: str | None) -> bool:
+    """Detect contradictory assign decisions whose reason says the topic is unrelated."""
+    normalized = " ".join(str(reason or "").split()).lower()
+    if not normalized:
+        return False
+    negative_markers = (
+        "무관",
+        "관련성이 없어",
+        "관련성이 없다",
+        "연관성이 없어",
+        "연관성이 없다",
+        "직접적인 연관성이 없어",
+        "직접적인 연관성이 없다",
+        "일치하지 않",
+        "후보가 없음",
+        "새로운 사건",
+        "새로운 사안",
+    )
+    return any(marker in normalized for marker in negative_markers)
+
+
+def _load_decision_score(decision: dict) -> float:
+    try:
+        return float(decision.get("score", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def run(conn, min_net: int, batch_size: int, top_k: int, llm_model: str) -> int:
@@ -57,17 +89,30 @@ def run(conn, min_net: int, batch_size: int, top_k: int, llm_model: str) -> int:
 
             # 토픽 후보 검색은 cause 임베딩으로 먼저 좁히고, 최종 판단만 LLM에 맡긴다.
             cause_query_embedding = to_vector_literal(embed_query(cause))
-            candidates = topic_causes.search_candidates(conn, cause_query_embedding, top_k)
+            candidates = topic_causes.search_candidates(
+                conn,
+                cause_query_embedding,
+                ev.category,
+                DISTANCE_THRESHOLD,
+                top_k,
+            )
             if candidates:
                 decision = _call_json(
                     client,
-                    build_topic_assignment_prompt(ev.title, ev.summary, candidates),
+                    build_topic_assignment_prompt(
+                        ev.title,
+                        ev.summary,
+                        cause,
+                        result,
+                        candidates,
+                    ),
                     required_keys={"action"},
                 )
             else:
                 decision = {
                     "action": "create",
                     "new_title": ev.title,
+                    "score": 0.0,
                     "reason": "검색 후보 없음",
                 }
 
@@ -75,6 +120,20 @@ def run(conn, min_net: int, batch_size: int, top_k: int, llm_model: str) -> int:
             action = decision["action"]
             if action not in {"assign", "create"}:
                 raise ValueError(f"Invalid topic action from LLM: {action!r}")
+            if action == "assign" and (
+                _load_decision_score(decision) < ASSIGN_SCORE_THRESHOLD
+                or _reason_rejects_assignment(decision.get("reason"))
+            ):
+                decision = {
+                    "action": "create",
+                    "new_title": ev.title,
+                    "score": _load_decision_score(decision),
+                    "reason": (
+                        "기존 후보와 직접 상관관계가 없다는 배정 사유가 감지되어 "
+                        "새 토픽으로 생성"
+                    ),
+                }
+                action = "create"
 
             result_embedding = to_vector_literal(embed_passage(result))
             cause_embedding = (

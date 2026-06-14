@@ -677,12 +677,20 @@ def mark_article_job_failed(conn, job_id: int, error: str, max_attempts: int) ->
         return
 
     now = now_iso()
-    status = """
-        CASE
-            WHEN COALESCE(attempts, 0) + 1 >= ? THEN 'failed'
-            ELSE 'pending'
-        END
-    """
+    if isinstance(conn, PostgresConnection):
+        status = """
+            CASE
+                WHEN COALESCE(attempts, 0) + 1 >= ? THEN 'failed'::public.article_job_status
+                ELSE 'pending'::public.article_job_status
+            END
+        """
+    else:
+        status = """
+            CASE
+                WHEN COALESCE(attempts, 0) + 1 >= ? THEN 'failed'
+                ELSE 'pending'
+            END
+        """
     conn.execute(
         f"""
         UPDATE article_jobs
