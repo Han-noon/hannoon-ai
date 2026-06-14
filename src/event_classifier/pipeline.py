@@ -74,7 +74,7 @@ def process_event_classification(
             row = conn.query_one(
                 """
                 SELECT a.id, a.content, a.published_at, a.category, a.article_image_url,
-                       a.bias_type, r.abuse_label
+                       a.bias_type, r.abuse_label, r.summary
                 FROM articles a
                 JOIN article_ai_results r ON a.id = r.article_id
                 WHERE a.id = ?
@@ -86,7 +86,7 @@ def process_event_classification(
             done_articles = conn.query(
                 """
                 SELECT a.id, a.content, a.published_at, a.category, a.article_image_url,
-                       a.bias_type, r.abuse_label
+                       a.bias_type, r.abuse_label, r.summary
                 FROM articles a
                 JOIN article_ai_results r ON a.id = r.article_id
                 WHERE r.status = 'done'
@@ -106,6 +106,7 @@ def process_event_classification(
             category = art["category"]
             img_url = art["article_image_url"]
             abuse_label = art["abuse_label"]
+            summary = art["summary"] or ""
             is_abusing = abuse_label == "abuse"
 
             trimmed_content = _get_first_sentences(full_content)
@@ -187,7 +188,7 @@ def process_event_classification(
                             conn,
                             category=category,
                             title=generated_title,
-                            summary="",
+                            summary=summary,
                             core_content=main_event,
                             embedding_text=trimmed_content,
                             embedding_literal=article_embedding,
