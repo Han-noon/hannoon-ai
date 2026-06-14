@@ -9,6 +9,8 @@ load_dotenv(override=True)
 MIN_NET_ARTICLE_COUNT = int(os.environ.get("TOPIC_MIN_NET_ARTICLE_COUNT", "5"))
 BATCH_SIZE = int(os.environ.get("TOPIC_BATCH_SIZE", "10"))
 TOP_K = int(os.environ.get("TOPIC_CANDIDATE_LIMIT", "12"))
+DISTANCE_THRESHOLD = float(os.environ.get("TOPIC_DISTANCE_THRESHOLD", "0.50"))
+ASSIGN_SCORE_THRESHOLD = float(os.environ.get("TOPIC_ASSIGN_SCORE_THRESHOLD", "0.75"))
 LLM_MODEL = os.environ.get(
     "LLM_TOPIC_MODEL",
     os.environ.get("LLM_TOPIC_EVENT_MODEL", os.environ.get("LLM_DEFAULT_MODEL", "solar-mini")),

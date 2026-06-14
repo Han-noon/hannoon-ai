@@ -35,19 +35,27 @@ def build_topic_cause_result_prompt(event_text: str) -> str:
 def build_topic_assignment_prompt(
     title: str,
     summary: str,
+    cause: str,
+    result: str,
     candidates: list[TopicCandidate],
 ) -> str:
     return f"""다음 뉴스 이벤트가 기존 토픽 중 하나에 속하는지 판단하세요.
 
 아래 둘 중 하나의 JSON 객체만 반환하세요:
-- 기존 토픽에 배정: {{"action": "assign", "topic_id": 123, "reason": "짧은 한국어 이유"}}
-- 새 토픽 생성: {{"action": "create", "new_title": "간결한 한국어 토픽 제목", "reason": "짧은 한국어 이유"}}
+- 기존 토픽에 배정: {{"action": "assign", "topic_id": 123, "score": 0.93, "reason": "짧은 한국어 이유"}}
+- 새 토픽 생성: {{"action": "create", "new_title": "간결한 한국어 토픽 제목", "score": 0.35, "reason": "짧은 한국어 이유"}}
 
 대상 이벤트:
 제목: {title}
 요약: {summary}
 
 후보 토픽:
+current cause: {cause}
+current result: {result}
+
+assign은 current cause/result가 후보 토픽의 stored causes와 직접적인 사건 흐름으로 이어질 때만 선택하세요.
+후보가 있더라도 직접 상관관계가 약하거나 distance가 높으면 create를 선택하세요.
+
 {_format_candidates(candidates)}
 
 판단 규칙:
@@ -65,6 +73,12 @@ def build_topic_assignment_prompt(
 - reason은 판단 근거를 한 문장으로 간결하게 작성하세요.
 - 마크다운 코드블록을 사용하지 말고 JSON 객체만 반환하세요.
 - 위 필드 외 추가 필드를 포함하지 마세요.
+
+점수 기준:
+- 0.90~1.00: 같은 연속 사건 흐름
+- 0.75~0.89: 직접 관련은 크지만 일부 정보 차이 있음
+- 0.40~0.74: 같은 분야나 유사 쟁점이지만 별도 흐름
+- 0.00~0.39: 무관하거나 별도 사건
 """
 
 
@@ -126,6 +140,8 @@ def _format_candidates(candidates: list[TopicCandidate]) -> str:
                 [
                     f"후보 {i}",
                     f"topic_id: {candidate.topic_id}",
+                    f"category: {candidate.category}",
+                    f"distance: {candidate.distance:.4f}",
                     f"title: {candidate.title}",
                     f"summary: {candidate.summary}",
                     "stored causes:",
