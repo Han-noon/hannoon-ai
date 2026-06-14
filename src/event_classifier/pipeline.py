@@ -13,7 +13,13 @@ from event_classifier.prompts import (
     build_event_assignment_prompt,
     build_extract_main_event_prompt,
 )
-from event_classifier.settings import BATCH_SIZE, DISTANCE_THRESHOLD, LLM_MODEL, TOP_K
+from event_classifier.settings import (
+    ASSIGN_SCORE_THRESHOLD,
+    BATCH_SIZE,
+    DISTANCE_THRESHOLD,
+    LLM_MODEL,
+    TOP_K,
+)
 from openai_client.client import LLMClient, parse_json_object
 
 
@@ -33,6 +39,34 @@ def _parse_json(response: str) -> dict:
     return parse_json_object(response.strip())
 
 
+def _reason_rejects_assignment(reason: str | None) -> bool:
+    """Detect contradictory assign decisions whose reason says the event is unrelated."""
+    normalized = " ".join(str(reason or "").split()).lower()
+    if not normalized:
+        return False
+    negative_markers = (
+        "무관",
+        "관련성이 없어",
+        "관련성이 없다",
+        "연관성이 없어",
+        "연관성이 없다",
+        "직접적인 연관성이 없어",
+        "직접적인 연관성이 없다",
+        "일치하지 않",
+        "동일한 사건으로 볼 수 없",
+        "새로운 사건",
+        "새로운 사안",
+    )
+    return any(marker in normalized for marker in negative_markers)
+
+
+def _load_decision_score(decision: dict) -> float:
+    try:
+        return float(decision.get("score", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _get_first_sentences(text: str, limit: int = 4) -> str:
     """이벤트 추출과 임베딩에 사용할 기사 앞부분을 잘라낸다."""
     if not text:
@@ -40,6 +74,42 @@ def _get_first_sentences(text: str, limit: int = 4) -> str:
     sentences = re.split(r"(?<=[.!?。！？])\s+", " ".join(text.split()))
     selected = [sentence.strip() for sentence in sentences if sentence.strip()][:limit]
     return " ".join(selected)
+
+
+def _join_labeled_text(*items: tuple[str, str | None]) -> str:
+    lines = []
+    for label, value in items:
+        text = " ".join(str(value or "").split())
+        if text:
+            lines.append(f"{label}: {text}")
+    return "\n".join(lines)
+
+
+def _build_event_source_text(
+    title: str,
+    ai_summary: str,
+    article_excerpt: str,
+) -> str:
+    return _join_labeled_text(
+        ("title", title),
+        ("ai_summary", ai_summary),
+        ("article_excerpt", article_excerpt),
+    )
+
+
+def _build_event_embedding_text(
+    title: str,
+    ai_summary: str,
+    main_event: str,
+    article_excerpt: str,
+) -> str:
+    return _join_labeled_text(
+        ("title", title),
+        ("ai_summary", ai_summary),
+        ("main_event", main_event),
+        ("article_excerpt", "" if ai_summary else article_excerpt),
+    )
+
 
 # articles 테이블의 벡터 및 대표 사건 데이터를 보완하는 쿼리
 UPDATE_ARTICLE_ANALYSIS_SQL = """
@@ -73,8 +143,9 @@ def process_event_classification(
         if single_article_id is not None:
             row = conn.query_one(
                 """
-                SELECT a.id, a.content, a.published_at, a.category, a.article_image_url,
-                       a.bias_type, r.abuse_label
+                SELECT a.id, a.title, a.content, a.published_at, a.category,
+                       a.article_image_url, a.bias_type, r.summary AS ai_summary,
+                       r.abuse_label
                 FROM articles a
                 JOIN article_ai_results r ON a.id = r.article_id
                 WHERE a.id = ?
@@ -85,8 +156,9 @@ def process_event_classification(
         else:
             done_articles = conn.query(
                 """
-                SELECT a.id, a.content, a.published_at, a.category, a.article_image_url,
-                       a.bias_type, r.abuse_label
+                SELECT a.id, a.title, a.content, a.published_at, a.category,
+                       a.article_image_url, a.bias_type, r.summary AS ai_summary,
+                       r.abuse_label
                 FROM articles a
                 JOIN article_ai_results r ON a.id = r.article_id
                 WHERE r.status = 'done'
@@ -102,21 +174,28 @@ def process_event_classification(
 
         for art in done_articles:
             art_id = art["id"]
+            title = str(art["title"] or "").strip()
             full_content = art["content"]
             category = art["category"]
             img_url = art["article_image_url"]
+            ai_summary = str(art["ai_summary"] or "").strip()
             abuse_label = art["abuse_label"]
             is_abusing = abuse_label == "abuse"
 
             trimmed_content = _get_first_sentences(full_content)
-            if not trimmed_content:
+            event_source_text = _build_event_source_text(
+                title,
+                ai_summary,
+                trimmed_content,
+            )
+            if not event_source_text:
                 continue
 
             try:
                 # 1차로 기사 앞부분에서 이벤트를 한 문장으로 압축한다.
                 res_extract = _parse_json(
                     client.request(
-                        build_extract_main_event_prompt(trimmed_content),
+                        build_extract_main_event_prompt(event_source_text),
                         response_format={"type": "json_object"},
                         temperature=0,
                     )
@@ -125,8 +204,15 @@ def process_event_classification(
                 if not main_event:
                     raise ValueError("LLM did not return main_event.")
 
+                event_embedding_text = _build_event_embedding_text(
+                    title,
+                    ai_summary,
+                    main_event,
+                    trimmed_content,
+                )
+
                 # 기존 이벤트 후보는 LLM이 아니라 pgvector 거리 검색으로 먼저 좁힌다.
-                article_query_embedding = to_vector_literal(embed_query(trimmed_content))
+                article_query_embedding = to_vector_literal(embed_query(event_embedding_text))
                 candidates = events.search_candidate_events(
                     conn,
                     article_query_embedding,
@@ -134,11 +220,17 @@ def process_event_classification(
                     DISTANCE_THRESHOLD,
                     TOP_K,
                 )
-                article_embedding = to_vector_literal(embed_passage(trimmed_content))
+                article_embedding = to_vector_literal(embed_passage(event_embedding_text))
                 if candidates:
                     decision = _parse_json(
                         client.request(
-                            build_event_assignment_prompt(main_event, candidates),
+                            build_event_assignment_prompt(
+                                title,
+                                ai_summary,
+                                main_event,
+                                category,
+                                candidates,
+                            ),
                             response_format={"type": "json_object"},
                             temperature=0,
                         )
@@ -153,6 +245,20 @@ def process_event_classification(
                 action = decision.get("action")
                 if action not in {"assign", "create"}:
                     raise ValueError(f"Invalid event action from LLM: {action!r}")
+                if action == "assign" and (
+                    _load_decision_score(decision) < ASSIGN_SCORE_THRESHOLD
+                    or _reason_rejects_assignment(decision.get("reason"))
+                ):
+                    decision = {
+                        "action": "create",
+                        "event_title": main_event,
+                        "score": _load_decision_score(decision),
+                        "reason": (
+                            "기존 후보와 같은 구체적 이벤트라는 확신이 낮아 "
+                            "새 이벤트로 생성"
+                        ),
+                    }
+                    action = "create"
 
                 with conn.transaction():
                     # 기사 자체에도 같은 임베딩과 핵심 사건 문장을 저장해 후속 분석에서 재사용한다.
@@ -187,9 +293,9 @@ def process_event_classification(
                             conn,
                             category=category,
                             title=generated_title,
-                            summary="",
+                            summary=ai_summary or main_event,
                             core_content=main_event,
-                            embedding_text=trimmed_content,
+                            embedding_text=event_embedding_text,
                             embedding_literal=article_embedding,
                             event_image_url=img_url,
                         )

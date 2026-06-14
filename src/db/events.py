@@ -67,7 +67,7 @@ UPDATE_NEXT_EVENT_SQL = "UPDATE events SET next_event_id = ? WHERE id = ?"
 UPDATE_PREV_EVENT_SQL = "UPDATE events SET prev_event_id = ? WHERE id = ?"
 
 SEARCH_CANDIDATE_EVENTS_SQL = """
-SELECT id, title, core_content, summary,
+SELECT id, category, title, core_content, summary, article_count,
        (embedding <=> ?::vector) AS distance
 FROM events
 WHERE embedding IS NOT NULL

@@ -33,7 +33,10 @@ def build_extract_main_event_prompt(article_text: str) -> str:
 
 
 def build_event_assignment_prompt(
+    article_title: str,
+    article_summary: str,
     main_event: str,
+    article_category: str,
     candidates: list[dict],
 ) -> str:
     return f"""새 기사 이벤트가 기존 이벤트 중 하나와 실질적으로 같은 이벤트인지 판단하세요.
@@ -45,11 +48,21 @@ def build_event_assignment_prompt(
 - 새 이벤트 생성:
 {{"action": "create", "event_title": "간결한 한국어 이벤트 제목", "score": 0.35, "reason": "짧은 한국어 이유"}}
 
+새 기사 제목:
+{article_title}
+
+새 기사 AI 요약:
+{article_summary or "(없음)"}
+
 새 기사 대표 이벤트:
 {main_event}
+article_category: {article_category}
 
 후보 이벤트:
 {_format_event_candidates(candidates)}
+
+candidate distance가 높거나 직접 상관관계가 약하면 후보가 있어도 create를 선택하세요.
+article_category와 후보 category가 다르면 같은 구체적 사건이라는 근거가 명확할 때만 assign 하세요.
 
 판단 기준:
 - 핵심 기준은 "같은 주제인가"가 아니라 "같은 구체적 이벤트인가"입니다.
@@ -151,6 +164,9 @@ def _format_event_candidates(candidates: list[dict]) -> str:
                 [
                     f"후보 {i}",
                     f"event_id: {candidate.get('id')}",
+                    f"category: {candidate.get('category') or ''}",
+                    f"distance: {float(candidate.get('distance') or 0):.4f}",
+                    f"article_count: {candidate.get('article_count') or 0}",
                     f"title: {candidate.get('title') or ''}",
                     f"core_content: {candidate.get('core_content') or ''}",
                     f"summary: {candidate.get('summary') or ''}",
