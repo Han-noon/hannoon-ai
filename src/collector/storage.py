@@ -628,6 +628,21 @@ def _adapt_keywords_for_storage(conn, keywords: list[str] | str | None):
 
 def mark_article_job_sent(conn, job_id: int) -> None:
     """후속 AI 처리가 끝난 기사 작업을 완료 상태로 표시한다."""
+    if isinstance(conn, PostgresConnection):
+        now = now_iso()
+        conn.execute(
+            """
+            UPDATE article_jobs
+            SET status = ?::public.article_job_status,
+                last_error = ?,
+                last_attempt_at = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            ("sent", None, now, now, job_id),
+        )
+        return
+
     now = now_iso()
     conn.execute(
         """
@@ -641,6 +656,26 @@ def mark_article_job_sent(conn, job_id: int) -> None:
 
 def mark_article_job_failed(conn, job_id: int, error: str, max_attempts: int) -> None:
     """분류 실패 시도 정보를 기록한다."""
+    if isinstance(conn, PostgresConnection):
+        now = now_iso()
+        conn.execute(
+            """
+            UPDATE article_jobs
+            SET status = CASE
+                    WHEN COALESCE(attempts, 0) + 1 >= ?
+                        THEN 'failed'::public.article_job_status
+                    ELSE 'pending'::public.article_job_status
+                END,
+                attempts = COALESCE(attempts, 0) + 1,
+                last_error = ?,
+                last_attempt_at = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (max_attempts, error, now, now, job_id),
+        )
+        return
+
     now = now_iso()
     if isinstance(conn, PostgresConnection):
         status = """
