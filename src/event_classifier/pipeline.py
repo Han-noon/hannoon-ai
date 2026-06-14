@@ -3,6 +3,8 @@
 import json
 import re
 import sys
+
+from dotenv import load_dotenv
 from collector.storage import ensure_db
 from openai_client.client import OpenAIClient
 from embedding import embed 
@@ -77,7 +79,7 @@ def process_event_classification(database_url: str | None, single_article_id: in
         if single_article_id is not None:
             row = conn.query_one(
                 """
-                SELECT a.id, a.content, a.published_at, a.category, a.article_image_url, a.bias_type, r.abuse_label
+                SELECT a.id, a.content, a.published_at, a.category, a.article_image_url, a.bias_type, r.abuse_label, r.summary
                 FROM articles a
                 JOIN article_ai_results r ON a.id = r.article_id
                 WHERE a.id = ?
@@ -88,10 +90,10 @@ def process_event_classification(database_url: str | None, single_article_id: in
             # 상태가 'done'인 대상 기사들을 가져온다.
             done_articles = conn.query(
                 """
-                SELECT a.id, a.content, a.published_at, a.category, a.article_image_url, a.bias_type, r.abuse_label
+                SELECT a.id, a.content, a.published_at, a.category, a.article_image_url, a.bias_type, r.abuse_label, r.summary
                 FROM articles a
                 JOIN article_ai_results r ON a.id = r.article_id
-                WHERE r.status = 'done' 
+                WHERE r.status = 'done'
                   AND a.content IS NOT NULL 
                   AND a.content != ''
                 ORDER BY a.published_at ASC 
@@ -109,6 +111,7 @@ def process_event_classification(database_url: str | None, single_article_id: in
             category = art["category"]
             img_url = art["article_image_url"]
             abuse_label = art["abuse_label"]
+            summary = art["summary"] or ""
 
             # 어뷰징 여부 사전 판정
             is_abusing = True if abuse_label == "abuse" else False
@@ -177,8 +180,8 @@ def process_event_classification(database_url: str | None, single_article_id: in
                         new_id = events.create_new_event(
                             conn, 
                             category=category, 
-                            title=generated_title,     
-                            summary="",                 
+                            title=generated_title,
+                            summary=summary,
                             core_content=main_event, 
                             embedding_text=trimmed_content, 
                             embedding=art_embedding, 
@@ -209,6 +212,7 @@ def process_event_classification(database_url: str | None, single_article_id: in
 
 def main() -> int:
     import os
+    load_dotenv()
     database_url = os.environ.get("DATABASE_URL")
     process_event_classification(database_url=database_url)
     return 0
