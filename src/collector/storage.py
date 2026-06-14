@@ -642,12 +642,20 @@ def mark_article_job_sent(conn, job_id: int) -> None:
 def mark_article_job_failed(conn, job_id: int, error: str, max_attempts: int) -> None:
     """분류 실패 시도 정보를 기록한다."""
     now = now_iso()
-    status = """
-        CASE
-            WHEN COALESCE(attempts, 0) + 1 >= ? THEN 'failed'
-            ELSE 'pending'
-        END
-    """
+    if isinstance(conn, PostgresConnection):
+        status = """
+            CASE
+                WHEN COALESCE(attempts, 0) + 1 >= ? THEN 'failed'::public.article_job_status
+                ELSE 'pending'::public.article_job_status
+            END
+        """
+    else:
+        status = """
+            CASE
+                WHEN COALESCE(attempts, 0) + 1 >= ? THEN 'failed'
+                ELSE 'pending'
+            END
+        """
     conn.execute(
         f"""
         UPDATE article_jobs
