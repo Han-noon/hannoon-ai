@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 from collector.storage import ensure_db
 from event_classifier.prompts import build_event_summary_prompt
 from openai_client.client import LLMClient
-from summary_utils import normalize_summary
+from summary_utils import TOPIC_TITLE_MAX_CHARS, normalize_summary, normalize_topic_title
 from topic_classifier.prompts import build_topic_rollup_prompt
 
 
@@ -96,11 +96,13 @@ WHERE summary IS NOT NULL
 ORDER BY article_id ASC
 """
 
-TOPIC_SUMMARY_TARGETS_SQL = """
+TOPIC_SUMMARY_TARGETS_SQL = f"""
 SELECT t.id, t.title, t.summary
 FROM topics t
 WHERE t.summary IS NOT NULL
   AND (
+      length(btrim(t.title)) > {TOPIC_TITLE_MAX_CHARS}
+      OR
       length(btrim(t.summary)) > 700
       OR length(btrim(t.summary)) < 80
       OR EXISTS (
@@ -264,7 +266,11 @@ def _backfill_topics(conn, apply: bool, limit: int, client: LLMClient | None) ->
     changed = 0
     for row in rows:
         update = _rollup_topic(conn, client, row) if client else {
-            "title": row["title"],
+            "title": (
+                normalize_topic_title(row["title"])
+                or normalize_topic_title(row["summary"])
+                or "제목 없음"
+            ),
             "summary": normalize_summary(row["summary"]),
         }
         if not update["summary"] or (
@@ -288,14 +294,25 @@ def _rollup_topic(conn, client: LLMClient, row) -> dict:
         if normalize_summary(item["summary"])
     ]
     if not event_summaries:
-        return {"title": row["title"], "summary": normalize_summary(row["summary"])}
+        return {
+            "title": (
+                normalize_topic_title(row["title"])
+                or normalize_topic_title(row["summary"])
+                or "제목 없음"
+            ),
+            "summary": normalize_summary(row["summary"]),
+        }
     data = client.request_json(
         build_topic_rollup_prompt(row["title"], event_summaries),
         required_keys={"title", "summary"},
         temperature=0,
     )
     return {
-        "title": str(data.get("title") or row["title"]).strip() or row["title"],
+        "title": (
+            normalize_topic_title(data.get("title") or row["title"])
+            or normalize_topic_title(row["summary"])
+            or "제목 없음"
+        ),
         "summary": normalize_summary(data.get("summary")) or normalize_summary(row["summary"]),
     }
 
