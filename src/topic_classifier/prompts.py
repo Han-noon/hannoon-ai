@@ -5,6 +5,7 @@ from db.topic_causes import TopicCandidate
 
 MAX_CANDIDATES = 8
 MAX_CAUSES_PER_CANDIDATE = 5
+MAX_EVENTS_PER_TOPIC_SUMMARY = 12
 
 
 def build_topic_cause_result_prompt(event_text: str) -> str:
@@ -121,6 +122,31 @@ def build_topic_update_prompt(
 """
 
 
+def build_topic_rollup_prompt(topic_title: str, event_summaries: list[dict]) -> str:
+    return f"""다음 이벤트 요약들을 바탕으로 뉴스 토픽의 제목과 요약을 갱신하세요.
+
+아래 JSON 객체만 반환하세요:
+{{"title": "토픽 제목", "summary": "토픽 요약"}}
+
+기존 토픽 제목:
+{topic_title}
+
+이벤트 요약 목록:
+{_format_topic_events(event_summaries)}
+
+작성 규칙:
+- 이벤트 요약 목록에 있는 확인된 사실만 사용하세요.
+- 토픽은 여러 이벤트를 관통하는 연속 이슈나 사건 흐름으로 설명하세요.
+- 같은 사실을 반복하지 말고 핵심 전개, 현재 상태, 후속 쟁점을 통합하세요.
+- 제목은 가능하면 기존 제목을 유지하되, 사건 범위가 명확해진 경우에만 간결하게 갱신하세요.
+- 요약은 1~3문장, 700자 이내로 작성하세요.
+- "이벤트 목록", "추가됐다", "갱신했다"처럼 입력 구조나 처리 과정을 드러내지 마세요.
+- 중립적인 "~다"체 평서문으로 작성하세요.
+- 마크다운 코드블록을 사용하지 말고 JSON 객체만 반환하세요.
+- 위 필드 외 추가 필드를 포함하지 마세요.
+"""
+
+
 def _format_candidates(candidates: list[TopicCandidate]) -> str:
     if not candidates:
         return "(검색된 후보 없음)"
@@ -150,4 +176,22 @@ def _format_candidates(candidates: list[TopicCandidate]) -> str:
             )
         )
 
+    return "\n\n".join(parts)
+
+
+def _format_topic_events(event_summaries: list[dict]) -> str:
+    if not event_summaries:
+        return "(이벤트 없음)"
+
+    parts = []
+    for i, item in enumerate(event_summaries[:MAX_EVENTS_PER_TOPIC_SUMMARY], 1):
+        parts.append(
+            "\n".join(
+                [
+                    f"이벤트 {i}",
+                    f"title: {item.get('title') or ''}",
+                    f"summary: {item.get('summary') or ''}",
+                ]
+            )
+        )
     return "\n\n".join(parts)

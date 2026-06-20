@@ -92,13 +92,13 @@ def parse_json_object(value: str) -> dict:
     순수 JSON 파싱 실패 시 가장 바깥 `{...}` 구간만 한 번 더 시도한다.
     """
     try:
-        data = json.loads(value)
+        data = json.loads(value, strict=False)
     except json.JSONDecodeError:
         start = value.find("{")
         end = value.rfind("}")
         if start < 0 or end < start:
             raise
-        data = json.loads(value[start : end + 1])
+        data = json.loads(value[start : end + 1], strict=False)
     if not isinstance(data, dict):
         raise ValueError("LLM response must be a JSON object.")
     return data

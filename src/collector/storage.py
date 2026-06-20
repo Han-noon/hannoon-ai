@@ -4,6 +4,8 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 
+from summary_utils import normalize_summary
+
 # DB 연결은 SQLite/Postgres 모두 autocommit으로 둔다(아래 ensure_* 참고).
 # 따라서 단발 쓰기는 즉시 커밋되고, 원자적으로 묶어야 하는 다중 쓰기만
 # `with conn.transaction():` 블록으로 감싼다. transaction() 중첩은 금지한다
@@ -562,6 +564,9 @@ def save_article_analysis_result(
 ) -> None:
     """LLM 기사 분석 결과 전체를 article_ai_results에 저장한다."""
     now = now_iso()
+    summary = normalize_summary(summary)
+    if not summary:
+        raise ValueError("Article analysis summary is empty.")
     stored_keywords = _adapt_keywords_for_storage(conn, keywords)
     conn.execute(
         """

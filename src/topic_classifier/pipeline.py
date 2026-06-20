@@ -8,16 +8,27 @@ from openai_client.client import LLMClient
 from topic_classifier.prompts import (
     build_topic_assignment_prompt,
     build_topic_cause_result_prompt,
-    build_topic_update_prompt,
+    build_topic_rollup_prompt,
 )
 from topic_classifier.settings import (
     ASSIGN_SCORE_THRESHOLD,
     DISTANCE_THRESHOLD,
     LLM_MODEL,
 )
+from summary_utils import normalize_summary
 
 
 _client: LLMClient | None = None
+
+
+FETCH_TOPIC_SUMMARY_EVENTS_SQL = """
+SELECT id, title, summary
+FROM events
+WHERE topic_id = ?
+  AND summary IS NOT NULL
+  AND btrim(summary) <> ''
+ORDER BY created_at ASC, id ASC
+"""
 
 
 def _get_client(model: str = LLM_MODEL) -> LLMClient:
@@ -60,6 +71,55 @@ def _load_decision_score(decision: dict) -> float:
         return float(decision.get("score", 0.0))
     except (TypeError, ValueError):
         return 0.0
+
+
+def _load_topic_summary_events(conn, topic_id: int) -> list[dict]:
+    return [
+        {
+            "event_id": row["id"],
+            "title": row["title"],
+            "summary": normalize_summary(row["summary"]),
+        }
+        for row in conn.query(FETCH_TOPIC_SUMMARY_EVENTS_SQL, (topic_id,))
+        if normalize_summary(row["summary"])
+    ]
+
+
+def _append_event_summary(
+    items: list[dict],
+    *,
+    event_id: int,
+    title: str,
+    summary: str,
+) -> list[dict]:
+    seen_ids = {int(item["event_id"]) for item in items if item.get("event_id") is not None}
+    normalized = normalize_summary(summary)
+    if event_id not in seen_ids and normalized:
+        items.append({"event_id": event_id, "title": title, "summary": normalized})
+    return items
+
+
+def _generate_topic_update(
+    client: LLMClient,
+    *,
+    topic_title: str,
+    event_summaries: list[dict],
+    fallback_summary: str,
+) -> dict:
+    fallback_summary = normalize_summary(fallback_summary)
+    try:
+        data = client.request_json(
+            build_topic_rollup_prompt(topic_title, event_summaries),
+            required_keys={"title", "summary"},
+            temperature=0,
+        )
+        title = str(data.get("title") or topic_title).strip() or topic_title
+        summary = normalize_summary(data.get("summary"))
+    except Exception as exc:
+        print(f"[topic] summary rollup failed: {exc}", file=sys.stderr)
+        title = topic_title
+        summary = ""
+    return {"title": title, "summary": summary or fallback_summary}
 
 
 def run(conn, min_net: int, batch_size: int, top_k: int, llm_model: str) -> int:
@@ -148,15 +208,16 @@ def run(conn, min_net: int, batch_size: int, top_k: int, llm_model: str) -> int:
                 if topic_id not in candidate_ids:
                     raise ValueError(f"LLM selected unknown topic_id={topic_id}.")
                 chosen = next(candidate for candidate in candidates if candidate.topic_id == topic_id)
-                topic_update = _call_json(
+                topic_update = _generate_topic_update(
                     client,
-                    build_topic_update_prompt(
-                        chosen.title,
-                        chosen.summary,
-                        ev.title,
-                        ev.summary,
+                    topic_title=chosen.title,
+                    event_summaries=_append_event_summary(
+                        _load_topic_summary_events(conn, topic_id),
+                        event_id=ev.id,
+                        title=ev.title,
+                        summary=ev.summary,
                     ),
-                    required_keys={"title", "summary"},
+                    fallback_summary=f"{chosen.summary} {ev.summary}",
                 )
 
             with conn.transaction():
@@ -166,7 +227,7 @@ def run(conn, min_net: int, batch_size: int, top_k: int, llm_model: str) -> int:
                         conn,
                         ev.category,
                         str(decision["new_title"]).strip(),
-                        ev.summary,
+                        normalize_summary(ev.summary),
                     )
                 else:
                     topics.update_topic(

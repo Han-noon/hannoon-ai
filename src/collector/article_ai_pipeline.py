@@ -15,6 +15,7 @@ def process_pending_articles(
     article_model: str,
     abuse_model: str,
     summary_model: str,
+    abuse_enabled: bool,
     batch_size: int,
     analysis_max_attempts: int = 3,
 ) -> int:
@@ -61,12 +62,14 @@ def process_pending_articles(
                 # 배치에 실제 처리 대상이 있을 때만 클라이언트를 생성해 빈 실행 비용을 피한다.
                 print(
                     "[pipeline] initializing LLM analyzer "
-                    f"(article={article_model}, abuse={abuse_model}, summary={summary_model})"
+                    f"(article={article_model}, abuse={abuse_model}, "
+                    f"summary={summary_model}, abuse_enabled={abuse_enabled})"
                 )
                 analyzer = ArticleLLMAnalyzer(
                     article_model=article_model,
                     abuse_model=abuse_model,
                     summary_model=summary_model,
+                    abuse_enabled=abuse_enabled,
                 )
 
             try:
@@ -109,7 +112,7 @@ def process_pending_articles(
                 f"job={job_id} article={article_id} -> "
                 f"summary=saved chars={len(result.summary)} "
                 f"abuse={result.abuse_label}:{result.abuse_score:.3f} "
-                f"keywords={len(result.keywords)} job_status=sent"
+                "job_status=sent"
             )
             completed += 1
             batch_completed += 1
