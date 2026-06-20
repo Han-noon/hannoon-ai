@@ -14,7 +14,7 @@ from collector.storage import ensure_sqlite_db, save_article_analysis_result
 from collector.article_llm import ArticleLLMAnalyzer
 from db import events, topics
 from openai_client.client import parse_json_object
-from summary_utils import normalize_summary
+from summary_utils import TOPIC_TITLE_MAX_CHARS, normalize_summary, normalize_topic_title
 
 
 class FakeConn:
@@ -38,6 +38,17 @@ class SummaryQualityTests(unittest.TestCase):
 
         self.assertLessEqual(len(summary), 80)
         self.assertNotIn("Five", summary)
+
+    def test_normalize_topic_title_limits_chars_and_trailing_period(self):
+        title = (
+            "김승룡 소방청장이 외유성 출장 의혹 등으로 감찰을 받아 "
+            "15일자로 의원 면직 처리됐다."
+        )
+
+        normalized = normalize_topic_title(title)
+
+        self.assertLessEqual(len(normalized), TOPIC_TITLE_MAX_CHARS)
+        self.assertFalse(normalized.endswith("."))
 
     def test_parse_json_object_accepts_control_characters(self):
         data = parse_json_object('{"summary": "line one\nline two"}')
@@ -91,9 +102,18 @@ class SummaryQualityTests(unittest.TestCase):
         self.assertNotIn("Five", event_conn.query_params[2])
 
         topic_conn = FakeConn()
-        topics.create_topic(topic_conn, "사회", "topic title", long_summary)
+        long_title = (
+            "서울 송파경찰서는 잠실 개표소에서 핸드볼 여성 유소년 "
+            "국가대표팀 선수들의 소지품을 검사한 피의자의 출석을 요구했다."
+        )
+        topics.create_topic(topic_conn, "사회", long_title, long_summary)
+        self.assertLessEqual(len(topic_conn.query_params[1]), TOPIC_TITLE_MAX_CHARS)
         self.assertLessEqual(len(topic_conn.query_params[2]), 700)
         self.assertNotIn("Five", topic_conn.query_params[2])
+
+        topics.update_topic(topic_conn, 123, long_title, long_summary)
+        self.assertLessEqual(len(topic_conn.execute_params[0]), TOPIC_TITLE_MAX_CHARS)
+        self.assertLessEqual(len(topic_conn.execute_params[1]), 700)
 
     def test_abuse_disabled_skips_abuse_and_keyword_classification(self):
         class FakeAnalyzer(ArticleLLMAnalyzer):

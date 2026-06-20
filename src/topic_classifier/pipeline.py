@@ -15,7 +15,7 @@ from topic_classifier.settings import (
     DISTANCE_THRESHOLD,
     LLM_MODEL,
 )
-from summary_utils import normalize_summary
+from summary_utils import normalize_summary, normalize_topic_title
 
 
 _client: LLMClient | None = None
@@ -113,13 +113,16 @@ def _generate_topic_update(
             required_keys={"title", "summary"},
             temperature=0,
         )
-        title = str(data.get("title") or topic_title).strip() or topic_title
+        title = normalize_topic_title(data.get("title") or topic_title)
         summary = normalize_summary(data.get("summary"))
     except Exception as exc:
         print(f"[topic] summary rollup failed: {exc}", file=sys.stderr)
-        title = topic_title
+        title = normalize_topic_title(topic_title)
         summary = ""
-    return {"title": title, "summary": summary or fallback_summary}
+    return {
+        "title": title or normalize_topic_title(fallback_summary) or "제목 없음",
+        "summary": summary or fallback_summary,
+    }
 
 
 def run(conn, min_net: int, batch_size: int, top_k: int, llm_model: str) -> int:

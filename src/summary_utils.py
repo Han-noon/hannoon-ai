@@ -5,7 +5,9 @@ import re
 
 SUMMARY_MAX_SENTENCES = 4
 SUMMARY_MAX_CHARS = 700
+TOPIC_TITLE_MAX_CHARS = 30
 _SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?\u3002\uff01\uff1f])\s+")
+_TITLE_TRAILING_RE = re.compile(r"[\s.,!?;:\u3002\uff01\uff1f\uff0c\uff1b\uff1a\u3001]+$")
 
 
 def clean_string(value) -> str:
@@ -48,3 +50,29 @@ def normalize_summary(
     if boundary >= max_chars // 2:
         return clipped[: boundary + 1].rstrip()
     return clipped[: max_chars - 3].rstrip() + "..."
+
+
+def normalize_topic_title(
+    value,
+    *,
+    max_chars: int = TOPIC_TITLE_MAX_CHARS,
+) -> str:
+    text = clean_string(value).strip(" \"'`")
+    if not text:
+        return ""
+
+    text = _TITLE_TRAILING_RE.sub("", text)
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+
+    clipped = text[:max_chars].rstrip()
+    boundary = max(
+        clipped.rfind(" "),
+        clipped.rfind(","),
+        clipped.rfind("\uff0c"),
+        clipped.rfind("\u3001"),
+        clipped.rfind("\u00b7"),
+    )
+    if boundary >= int(max_chars * 0.65):
+        clipped = clipped[:boundary].rstrip()
+    return _TITLE_TRAILING_RE.sub("", clipped)
