@@ -3,9 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from openai_client.client import LLMClient
+from summary_utils import clean_string, normalize_summary
 
 from .settings import (
     DEFAULT_LLM_ABUSE_MODEL,
+    DEFAULT_LLM_ABUSE_ENABLED,
     DEFAULT_LLM_ARTICLE_MODEL,
     DEFAULT_LLM_SUMMARY_MODEL,
 )
@@ -23,7 +25,7 @@ class ArticleAnalysis:
 
 
 class ArticleLLMAnalyzer:
-    """기사 요약, 어뷰징 판단, 키워드 추출을 LLM으로 수행한다."""
+    """기사 요약과 어뷰징 판단을 LLM으로 수행한다."""
 
     def __init__(
         self,
@@ -31,10 +33,12 @@ class ArticleLLMAnalyzer:
         article_model: str = DEFAULT_LLM_ARTICLE_MODEL,
         abuse_model: str = DEFAULT_LLM_ABUSE_MODEL,
         summary_model: str = DEFAULT_LLM_SUMMARY_MODEL,
+        abuse_enabled: bool = DEFAULT_LLM_ABUSE_ENABLED,
     ) -> None:
         self.article_model = article_model
         self.abuse_model = abuse_model
         self.summary_model = summary_model
+        self.abuse_enabled = abuse_enabled
         self._clients: dict[str, LLMClient] = {}
 
     def analyze(
@@ -45,7 +49,9 @@ class ArticleLLMAnalyzer:
         category: str,
         content: str,
     ) -> ArticleAnalysis:
-        if self.abuse_model == self.summary_model:
+        content = _clean_string(content)
+
+        if self.abuse_enabled and self.abuse_model == self.summary_model:
             # 같은 모델을 쓸 때는 한 번의 호출로 비용과 지연 시간을 줄인다.
             return self._combined_analysis(
                 model=self.abuse_model or self.article_model,
@@ -56,20 +62,26 @@ class ArticleLLMAnalyzer:
             )
 
         summary = self._summarize(title=title, category=category, content=content)
-        abuse_label, abuse_score, abuse_reason = self._classify_abuse(
-            title=title,
-            subtitle=subtitle,
-            category=category,
-            content=content,
-            summary=summary,
-        )
-        keywords = self._extract_keywords(title=title, summary=summary, content=content)
+        if self.abuse_enabled:
+            abuse_label, abuse_score, abuse_reason = self._classify_abuse(
+                title=title,
+                subtitle=subtitle,
+                category=category,
+                content=content,
+                summary=summary,
+            )
+        else:
+            abuse_label, abuse_score, abuse_reason = (
+                "normal",
+                0.0,
+                "abuse_classification_skipped",
+            )
         return ArticleAnalysis(
             summary=summary,
             abuse_label=abuse_label,
             abuse_score=abuse_score,
             abuse_reason=abuse_reason,
-            keywords=keywords,
+            keywords=[],
         )
 
     def _client(self, model: str) -> LLMClient:
@@ -93,8 +105,7 @@ class ArticleLLMAnalyzer:
   "summary": "중립적인 한국어 요약 4문장",
   "abuse_label": "abuse 또는 normal",
   "abuse_score": 0.0,
-  "abuse_reason": "짧은 한국어 판단 근거",
-  "keywords": ["키워드1", "키워드2"]
+  "abuse_reason": "짧은 한국어 판단 근거"
 }}
 
 규칙:
@@ -105,7 +116,6 @@ class ArticleLLMAnalyzer:
   근거 없이 과도하게 자극적이거나, 본문 의미를 의도적으로 왜곡하는 경우입니다.
 - normal은 제목과 본문이 일관된 일반 보도인 경우입니다.
 - abuse_score는 0 이상 1 이하 숫자여야 합니다.
-- keywords는 간결한 한국어 키워드 최대 8개로 제한하세요.
 - summary는 기본 4문장, 전체 400~700자 정도로 작성하세요.
 - summary 1문장은 핵심 사건/변화(누가, 무엇을 했는지)를 담으세요.
 - summary 2문장은 배경/원인/맥락을 담으세요.
@@ -153,7 +163,7 @@ RSS 요약: {subtitle}
             required_keys={"summary"},
             temperature=0,
         )
-        summary = _clean_string(data.get("summary"))
+        summary = normalize_summary(data.get("summary"))
         if not summary:
             raise ValueError("LLM summary is empty.")
         return summary
@@ -195,32 +205,8 @@ RSS 요약: {subtitle}
         reason = _clean_string(data.get("abuse_reason")) or "llm_classification"
         return label, score, reason
 
-    def _extract_keywords(self, *, title: str, summary: str, content: str) -> list[str]:
-        prompt = f"""다음 기사에서 간결한 한국어 키워드를 추출하세요.
-
-아래 JSON 객체만 반환하세요:
-{{"keywords": ["키워드1", "키워드2"]}}
-
-규칙:
-- 키워드는 최대 8개입니다.
-- 명사 또는 짧은 명사구를 사용하세요.
-- 기사에 나온 사실만 사용하세요.
-
-제목: {title}
-요약: {summary}
-기사 본문:
-{content[:3000]}
-"""
-        data = self._client(self.summary_model).request_json(
-            prompt,
-            required_keys={"keywords"},
-            temperature=0,
-        )
-        return _normalize_keywords(data.get("keywords"))
-
-
 def _normalize_analysis(data: dict) -> ArticleAnalysis:
-    summary = _clean_string(data.get("summary"))
+    summary = normalize_summary(data.get("summary"))
     if not summary:
         raise ValueError("LLM summary is empty.")
     return ArticleAnalysis(
@@ -228,7 +214,7 @@ def _normalize_analysis(data: dict) -> ArticleAnalysis:
         abuse_label=_normalize_label(data.get("abuse_label")),
         abuse_score=_normalize_score(data.get("abuse_score")),
         abuse_reason=_clean_string(data.get("abuse_reason")) or "llm_classification",
-        keywords=_normalize_keywords(data.get("keywords")),
+        keywords=[],
     )
 
 
@@ -247,20 +233,5 @@ def _normalize_score(value) -> float:
     return max(0.0, min(1.0, score))
 
 
-def _normalize_keywords(value) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    keywords: list[str] = []
-    for item in value:
-        text = _clean_string(item)
-        if text and text not in keywords:
-            keywords.append(text)
-        if len(keywords) >= 8:
-            break
-    return keywords
-
-
 def _clean_string(value) -> str:
-    if value is None:
-        return ""
-    return " ".join(str(value).split())
+    return clean_string(value)

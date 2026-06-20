@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from summary_utils import normalize_summary
+
 
 @dataclass
 class Event:
@@ -83,6 +85,13 @@ SET left_count  = CASE WHEN (SELECT bias_type FROM articles WHERE id = ?) = '진
     mid_count   = CASE WHEN (SELECT bias_type FROM articles WHERE id = ?) = '중도' THEN mid_count   + 1 ELSE mid_count   END,
     right_count = CASE WHEN (SELECT bias_type FROM articles WHERE id = ?) = '보수' THEN right_count + 1 ELSE right_count END
 WHERE e.id = ?
+"""
+
+UPDATE_EVENT_SUMMARY_SQL = """
+UPDATE events
+SET summary = ?,
+    updated_at = now()
+WHERE id = ?
 """
 
 # 신규 이벤트 생성 (RETURNING id로 방금 생성된 id 획득)
@@ -178,6 +187,7 @@ def create_new_event(
     event_image_url: str | None = None,
 ) -> int:
     """새 이벤트를 만들고 생성된 id를 반환한다."""
+    summary = normalize_summary(summary) or normalize_summary(title)
     row = conn.query_one(
         INSERT_NEW_EVENT_SQL,
         (
@@ -191,6 +201,14 @@ def create_new_event(
         ),
     )
     return row["id"]
+
+
+def update_event_summary(conn, event_id: int, summary: str) -> None:
+    """이벤트 요약을 공통 길이 규칙에 맞춰 갱신한다."""
+    summary = normalize_summary(summary)
+    if not summary:
+        raise ValueError("Event summary is empty.")
+    conn.execute(UPDATE_EVENT_SUMMARY_SQL, (summary, event_id))
 
 
 def link_article_to_event(

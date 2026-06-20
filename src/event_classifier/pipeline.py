@@ -11,6 +11,7 @@ from db import events
 from embedding import embed_passage, embed_query, to_vector_literal
 from event_classifier.prompts import (
     build_event_assignment_prompt,
+    build_event_summary_prompt,
     build_extract_main_event_prompt,
 )
 from event_classifier.settings import (
@@ -21,6 +22,7 @@ from event_classifier.settings import (
     TOP_K,
 )
 from openai_client.client import LLMClient, parse_json_object
+from summary_utils import normalize_summary
 
 
 _client: LLMClient | None = None
@@ -111,6 +113,27 @@ def _build_event_embedding_text(
     )
 
 
+FETCH_EVENT_SUMMARY_ARTICLES_SQL = """
+SELECT article_id, title, summary
+FROM (
+    SELECT a.id AS article_id, a.title AS title, r.summary AS summary
+    FROM event_articles ea
+    JOIN articles a ON a.id = ea.article_id
+    JOIN article_ai_results r ON r.article_id = a.id
+    WHERE ea.event_id = ?
+    UNION
+    SELECT a.id AS article_id, a.title AS title, r.summary AS summary
+    FROM abusing_articles aa
+    JOIN articles a ON a.id = aa.article_id
+    JOIN article_ai_results r ON r.article_id = a.id
+    WHERE aa.event_id = ?
+) source
+WHERE summary IS NOT NULL
+  AND btrim(summary) <> ''
+ORDER BY article_id ASC
+"""
+
+
 # articles 테이블의 벡터 및 대표 사건 데이터를 보완하는 쿼리
 UPDATE_ARTICLE_ANALYSIS_SQL = """
 UPDATE articles
@@ -127,6 +150,55 @@ SET status = ?::public.article_ai_status,
     updated_at = now()
 WHERE article_id = ?
 """
+
+
+def _load_event_summary_articles(conn, event_id: int) -> list[dict]:
+    return [
+        {
+            "article_id": row["article_id"],
+            "title": row["title"],
+            "summary": normalize_summary(row["summary"]),
+        }
+        for row in conn.query(FETCH_EVENT_SUMMARY_ARTICLES_SQL, (event_id, event_id))
+        if normalize_summary(row["summary"])
+    ]
+
+
+def _append_article_summary(
+    items: list[dict],
+    *,
+    article_id: int,
+    title: str,
+    summary: str,
+) -> list[dict]:
+    seen_ids = {int(item["article_id"]) for item in items if item.get("article_id") is not None}
+    normalized = normalize_summary(summary)
+    if article_id not in seen_ids and normalized:
+        items.append({"article_id": article_id, "title": title, "summary": normalized})
+    return items
+
+
+def _generate_event_summary(
+    client: LLMClient,
+    *,
+    event_title: str,
+    article_summaries: list[dict],
+    fallback_summary: str,
+) -> str:
+    fallback = normalize_summary(fallback_summary)
+    if len(article_summaries) <= 1:
+        return normalize_summary(article_summaries[0]["summary"]) if article_summaries else fallback
+    try:
+        data = client.request_json(
+            build_event_summary_prompt(event_title, article_summaries),
+            required_keys={"summary"},
+            temperature=0,
+        )
+        summary = normalize_summary(data.get("summary"))
+    except Exception as exc:
+        print(f"[event] summary rollup failed: {exc}", file=sys.stderr)
+        summary = ""
+    return summary or fallback
 
 
 def process_event_classification(
@@ -260,15 +332,39 @@ def process_event_classification(
                     }
                     action = "create"
 
+                event_id = None
+                event_summary = None
+                if action == "assign":
+                    event_id = int(decision["event_id"])
+                    candidate_ids = {int(candidate["id"]) for candidate in candidates}
+                    if event_id not in candidate_ids:
+                        raise ValueError(f"LLM selected unknown event_id={event_id}.")
+                    selected_event = next(
+                        candidate for candidate in candidates if int(candidate["id"]) == event_id
+                    )
+                    event_summary = _generate_event_summary(
+                        client,
+                        event_title=str(selected_event.get("title") or title),
+                        article_summaries=_append_article_summary(
+                            _load_event_summary_articles(conn, event_id),
+                            article_id=art_id,
+                            title=title,
+                            summary=ai_summary,
+                        ),
+                        fallback_summary=(
+                            str(selected_event.get("summary") or "")
+                            or ai_summary
+                            or main_event
+                        ),
+                    )
+
                 with conn.transaction():
                     # 기사 자체에도 같은 임베딩과 핵심 사건 문장을 저장해 후속 분석에서 재사용한다.
                     conn.execute(UPDATE_ARTICLE_ANALYSIS_SQL, (article_embedding, main_event, art_id))
 
                     if action == "assign":
-                        event_id = int(decision["event_id"])
-                        candidate_ids = {int(candidate["id"]) for candidate in candidates}
-                        if event_id not in candidate_ids:
-                            raise ValueError(f"LLM selected unknown event_id={event_id}.")
+                        assert event_id is not None
+                        assert event_summary is not None
                         if is_abusing:
                             events.update_event_counters(
                                 conn,
@@ -284,6 +380,7 @@ def process_event_classification(
                             reason,
                             is_abusing=is_abusing,
                         )
+                        events.update_event_summary(conn, event_id, event_summary)
                         msg = f"assigned to event {event_id}"
                     else:
                         generated_title = str(
@@ -293,7 +390,7 @@ def process_event_classification(
                             conn,
                             category=category,
                             title=generated_title,
-                            summary=ai_summary or main_event,
+                            summary=normalize_summary(ai_summary or main_event),
                             core_content=main_event,
                             embedding_text=event_embedding_text,
                             embedding_literal=article_embedding,
