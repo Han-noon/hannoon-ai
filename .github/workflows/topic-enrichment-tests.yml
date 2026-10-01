@@ -1,0 +1,19 @@
+name: Topic enrichment checks
+on:
+  pull_request:
+    branches: [develop]
+    paths: ['tools/topic_enrichment/**', '.github/workflows/topic-enrichment-tests.yml']
+  push:
+    branches: [develop]
+    paths: ['tools/topic_enrichment/**', '.github/workflows/topic-enrichment-tests.yml']
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --test tools/topic_enrichment/tests.mjs tools/topic_enrichment/relations.test.mjs

@@ -1,0 +1,34 @@
+{
+  "checked_at": "2026-10-01T11:47:03.620Z",
+  "version": "topic-enrichment-v2",
+  "model": "qwen3:4b:359d7dd4bcdab3d86b87d73ac27966f4dbb9f5efdfcc75d34a8764a09474fae7",
+  "input_hash": "8cd2a61e456d46d958d3fa418959a742e174a2e20f5199b580c96bd9aee0182b",
+  "scope": "Cached event titles and linked article titles; not live DB, no held-out accuracy claim",
+  "topics": 10,
+  "events": 885,
+  "pairs": 45,
+  "relations": [
+    {
+      "topic_id": "1",
+      "related_topic_id": "2",
+      "source_event_ids": [
+        "763"
+      ],
+      "target_event_ids": [
+        "686"
+      ]
+    }
+  ],
+  "database": {
+    "isolated": true,
+    "publish": {
+      "saved": true,
+      "version": 1,
+      "topic_count": 10,
+      "relation_count": 1
+    },
+    "public_ids_are_numbers": true,
+    "pipeline_summary_preserved": true
+  },
+  "unit_tests": 17
+}
