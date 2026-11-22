@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["candidates"],
+  "additionalProperties": false,
+  "properties": {
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "type",
+          "common_basis",
+          "membership_criterion",
+          "candidate_event_ids",
+          "reason"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "type": {
+            "type": "string",
+            "enum": ["FOCAL_POINT", "PROCESS", "RECURRING_ISSUE"]
+          },
+          "common_basis": {"type": "string", "minLength": 1},
+          "membership_criterion": {"type": "string", "minLength": 1},
+          "candidate_event_ids": {
+            "type": "array",
+            "minItems": 2,
+            "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1}
+          },
+          "reason": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}
