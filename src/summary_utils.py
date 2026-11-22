@@ -4,6 +4,8 @@ import re
 
 
 SUMMARY_MAX_SENTENCES = 4
+# 이벤트 카드 요약은 기사·토픽 요약보다 짧게 둔다.
+EVENT_SUMMARY_MAX_SENTENCES = 3
 SUMMARY_MAX_CHARS = 700
 TOPIC_TITLE_MAX_CHARS = 30
 _SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?\u3002\uff01\uff1f])\s+")

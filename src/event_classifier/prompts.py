@@ -72,6 +72,48 @@ def build_structure_tense_retry_prompt(
 """
 
 
+def build_event_summary_prompt(event_title: str, article_summaries: list[dict]) -> str:
+    used = article_summaries[:MAX_SUMMARY_ARTICLES]
+    base_date = max((str(item.get("published_at") or "")[:16] for item in used), default="") or "알 수 없음"
+    return f"""다음 기사 요약들을 바탕으로 뉴스 이벤트 요약을 갱신하세요.
+입력 기사 요약은 "~다"체지만, summary의 모든 문장은 반드시 "~습니다" 또는 "~입니다"로 끝내세요.
+
+아래 JSON 객체만 반환하세요:
+{{"summary": "~했습니다. ~할 예정입니다. 형태의 이벤트 요약", "short_summary": "짧은 명사형 요약"}}
+
+이벤트 제목:
+{event_title}
+
+요약 기준 시점(가장 최근 기사 게시 시각): {base_date}
+
+기사 요약 목록(게시일 순):
+{_format_summary_articles(article_summaries)}
+
+summary 작성 규칙:
+- 기사 요약 목록에 있는 확인된 사실만 사용하세요.
+- 같은 사실을 반복하지 말고 이벤트 단위의 흐름으로 통합하세요.
+- 서로 다른 기사에서 보강된 날짜, 주체, 장소, 수치, 절차 상태는 반영하세요.
+- 같은 일의 상태가 기사마다 다르면(예: 앞선 기사는 "~할 예정이다", 나중 기사는 "~했다") 게시 시각이 가장 늦은 기사의 상태를 따르세요.
+- 요약 기준 시점 이후에 일어나거나 끝나는 일은 이미 일어난 것처럼("~했습니다", "~되었습니다") 쓰지 말고 "~할 예정입니다", "~되고 있습니다"처럼 예정·진행 형태로 쓰세요.
+- "예정", "검토", "발표", "착수", "진행", "종료", "결렬", "확정", "송치", "기소" 같은 상태와 절차 표현을 기사에 쓰인 것과 다르게 바꾸지 마세요.
+- 날짜는 게시일을 기준으로 연·월·일이 모두 있는 완전한 날짜로 쓰세요(예: 게시일 2025-03-02 기사의 "28일" → "2025년 3월 28일").
+- 입력 구조를 드러내는 "기사들은", "보도에 따르면", "추가 보도" 같은 표현은 피하세요.
+- 요약은 최대 3문장, 700자 이내로 작성하세요.
+- 중립적인 "~습니다"체 평서문으로 작성하세요(예: "~했습니다", "~할 예정입니다"). "~다"체로 쓰지 마세요.
+
+short_summary 작성 규칙:
+- summary를 먼저 완성한 뒤, summary에서 이벤트 제목에 없는 핵심 결과나 수치 하나를 골라 한 구의 명사형으로 줄여 쓰세요(문장이 아닙니다). 끝에 마침표를 찍지 마세요.
+- 12~15자 안팎으로 짧게 쓰고, 18자를 넘기지 마세요.
+- 고른 내용의 절차 상태("예정", "예상", "검토", "진행 중" 등)를 그대로 남기세요. summary에 없는 내용, 목적·의의, 전망, 해석은 넣지 마세요.
+- 날짜, 인용 발언, 의문문은 넣지 마세요.
+- 형식 예: 이벤트 제목이 "정부 의대 증원안 발표"이고 summary에 "의대 정원을 2,000명 늘리는 방안을 공식 발표했습니다."가 있으면 short_summary는 "의대 2,000명 확대 공식화"
+
+공통 규칙:
+- 마크다운 코드블록을 사용하지 말고 JSON 객체만 반환하세요.
+- 위 필드 외 추가 필드를 포함하지 마세요.
+"""
+
+
 def build_event_title_prompt(article_title: str, major: str, published_at: str) -> str:
     """새 이벤트의 이름(명사형 구)을 만드는 프롬프트. 기사 헤드라인 문체를 걷어낸다."""
     return f"""다음 뉴스 기사의 핵심 사건에 붙일 이벤트 이름을 지으세요.
@@ -101,31 +143,6 @@ def build_event_title_prompt(article_title: str, major: str, published_at: str) 
 """
 
 
-# 이벤트 요약 롤업 프롬프트(scripts/backfill_summaries.py 사용). 이 변경 범위 밖이라 develop 그대로 둔다.
-def build_event_summary_prompt(event_title: str, article_summaries: list[dict]) -> str:
-    return f"""다음 기사 요약들을 바탕으로 뉴스 이벤트 요약을 갱신하세요.
-
-아래 JSON 객체만 반환하세요:
-{{"summary": "이벤트 요약"}}
-
-이벤트 제목:
-{event_title}
-
-기사 요약 목록:
-{_format_summary_articles(article_summaries)}
-
-작성 규칙:
-- 기사 요약 목록에 있는 확인된 사실만 사용하세요.
-- 같은 사실을 반복하지 말고 이벤트 단위의 흐름으로 통합하세요.
-- 서로 다른 기사에서 보강된 날짜, 주체, 장소, 수치, 절차 상태는 반영하세요.
-- 입력 구조를 드러내는 "기사들은", "보도에 따르면", "추가 보도" 같은 표현은 피하세요.
-- 요약은 2~4문장, 700자 이내로 작성하세요.
-- 중립적인 "~다"체 평서문으로 작성하세요.
-- 마크다운 코드블록을 사용하지 말고 JSON 객체만 반환하세요.
-- 위 필드 외 추가 필드를 포함하지 마세요.
-"""
-
-
 def _format_summary_articles(article_summaries: list[dict]) -> str:
     if not article_summaries:
         return "(요약 없음)"
@@ -136,6 +153,7 @@ def _format_summary_articles(article_summaries: list[dict]) -> str:
             "\n".join(
                 [
                     f"기사 {i}",
+                    f"게시 시각: {str(item.get('published_at') or '')[:16] or '알 수 없음'}",
                     f"title: {item.get('title') or ''}",
                     f"summary: {item.get('summary') or ''}",
                 ]

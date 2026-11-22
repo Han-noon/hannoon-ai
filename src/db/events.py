@@ -10,7 +10,7 @@ from event_classifier.settings import (
     K_VEC,
     MIN_SHARED_ENTITIES,
 )
-from summary_utils import normalize_summary
+from summary_utils import EVENT_SUMMARY_MAX_SENTENCES, normalize_summary
 
 # 결합 점수(distance와 entity 자카드를 합친 내부 랭킹용 점수, 값이 낮을수록 좋음) 가중치.
 # 실측 후 조정 가능한 placeholder(Implementation Step 5, 2026-07-22 확정).
@@ -157,6 +157,7 @@ WHERE id = ANY(?)
 UPDATE_EVENT_SUMMARY_SQL = """
 UPDATE events
 SET summary = ?,
+    short_summary = COALESCE(?, short_summary),
     updated_at = now()
 WHERE id = ?
 """
@@ -356,7 +357,9 @@ def create_new_event(
     event_image_url: str | None = None,
 ) -> int:
     """새 이벤트를 만들고 생성된 id를 반환한다."""
-    summary = normalize_summary(summary) or normalize_summary(title)
+    summary = normalize_summary(
+        summary, max_sentences=EVENT_SUMMARY_MAX_SENTENCES
+    ) or normalize_summary(title)
     row = conn.query_one(
         INSERT_NEW_EVENT_SQL,
         (
@@ -372,12 +375,14 @@ def create_new_event(
     return row["id"]
 
 
-def update_event_summary(conn, event_id: int, summary: str) -> None:
-    """이벤트 요약을 공통 길이 규칙에 맞춰 갱신한다."""
-    summary = normalize_summary(summary)
+def update_event_summary(
+    conn, event_id: int, summary: str, short_summary: str | None = None
+) -> None:
+    """이벤트 요약(최대 3문장)과 짧은 명사형 요약을 갱신한다. 짧은 요약이 없으면 기존 값을 둔다."""
+    summary = normalize_summary(summary, max_sentences=EVENT_SUMMARY_MAX_SENTENCES)
     if not summary:
         raise ValueError("Event summary is empty.")
-    conn.execute(UPDATE_EVENT_SUMMARY_SQL, (summary, event_id))
+    conn.execute(UPDATE_EVENT_SUMMARY_SQL, (summary, short_summary or None, event_id))
 
 
 def link_article_to_event(conn, event_id: int, article_id: int, reason: str):

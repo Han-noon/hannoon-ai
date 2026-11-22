@@ -13,6 +13,8 @@ if str(SRC) not in sys.path:
 from collector.storage import ensure_sqlite_db, save_article_analysis_result
 from collector.article_llm import ArticleLLMAnalyzer
 from db import events, topics
+from event_classifier.prompts import build_event_summary_prompt
+from event_summary import generate_event_summary, generate_event_title
 from openai_client.client import parse_json_object
 from summary_utils import TOPIC_TITLE_MAX_CHARS, normalize_summary, normalize_topic_title
 
@@ -28,6 +30,24 @@ class FakeConn:
 
     def execute(self, sql, params=None):
         self.execute_params = params
+
+
+class FakeLLM:
+    """결과 하나 또는 호출 순서대로 돌려줄 결과 목록을 받는다(마지막 결과는 반복)."""
+
+    def __init__(self, *results):
+        self.results = list(results)
+        self.calls = 0
+
+    def request_json(self, prompt, **kwargs):
+        result = self.results[min(self.calls, len(self.results) - 1)]
+        self.calls += 1
+        if isinstance(result, Exception):
+            raise result
+        missing = kwargs.get("required_keys", set()) - set(result)
+        if missing:
+            raise ValueError(f"missing {missing}")
+        return result
 
 
 class SummaryQualityTests(unittest.TestCase):
@@ -99,7 +119,13 @@ class SummaryQualityTests(unittest.TestCase):
             embedding_literal="[0.1]",
         )
         self.assertLessEqual(len(event_conn.query_params[2]), 700)
-        self.assertNotIn("Five", event_conn.query_params[2])
+        self.assertNotIn("Four", event_conn.query_params[2])
+
+        events.update_event_summary(event_conn, 123, long_summary, "짧은 요약")
+        self.assertEqual(event_conn.execute_params[0], "One. Two. Three.")
+        self.assertEqual(event_conn.execute_params[1:], ("짧은 요약", 123))
+        events.update_event_summary(event_conn, 123, long_summary)
+        self.assertIsNone(event_conn.execute_params[1])
 
         topic_conn = FakeConn()
         long_title = (
@@ -114,6 +140,65 @@ class SummaryQualityTests(unittest.TestCase):
         topics.update_topic(topic_conn, 123, long_title, long_summary)
         self.assertLessEqual(len(topic_conn.execute_params[0]), TOPIC_TITLE_MAX_CHARS)
         self.assertLessEqual(len(topic_conn.execute_params[1]), 700)
+
+    def test_generate_event_title_normalizes_and_falls_back_to_headline(self):
+        title = generate_event_title(
+            FakeLLM({"title": "서울 아파트값 30주 연속 상승."}),
+            article_title="“또 올랐다”…서울 아파트값",
+            major="major",
+            published_at="2026-07-01",
+        )
+        self.assertEqual(title, "서울 아파트값 30주 연속 상승")
+
+        for client in (FakeLLM(RuntimeError("boom")), FakeLLM({"title": " "})):
+            title = generate_event_title(
+                client,
+                article_title="  “또 올랐다”…서울   아파트값 ",
+                major="major",
+                published_at="2026-07-01",
+            )
+            self.assertEqual(title, "“또 올랐다”…서울 아파트값")
+
+    def test_generate_event_title_never_cuts_long_title(self):
+        long_title = "이재명 대통령 NATO 정상회의 참석 후 몽골 국빈 방문 및 한몽 공동선언 발표 일정 확정."
+        client = FakeLLM({"title": long_title})
+        title = generate_event_title(client, article_title="h", major="m", published_at="2026-07-07")
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(title, long_title.rstrip("."))
+
+    def test_event_summary_prompt_gives_publish_times_and_latest_base_time(self):
+        prompt = build_event_summary_prompt(
+            "t",
+            [
+                {"title": "a", "published_at": "2026-07-06 06:35", "summary": "A."},
+                {"title": "b", "published_at": "2026-07-06 19:44", "summary": "B."},
+            ],
+        )
+        self.assertIn("요약 기준 시점(가장 최근 기사 게시 시각): 2026-07-06 19:44", prompt)
+        self.assertIn("게시 시각: 2026-07-06 06:35", prompt)
+
+    def test_generate_event_summary_returns_short_summary(self):
+        articles = [
+            {"article_id": 1, "title": "a", "summary": "A."},
+            {"article_id": 2, "title": "b", "summary": "B."},
+        ]
+        summary, short = generate_event_summary(
+            FakeLLM({"summary": "One. Two. Three. Four.", "short_summary": "의대 정원 2,000명 확대 공식화."}),
+            event_title="t",
+            article_summaries=articles,
+            fallback_summary="Fallback.",
+        )
+        self.assertEqual(summary, "One. Two. Three.")
+        self.assertEqual(short, "의대 정원 2,000명 확대 공식화")
+
+        summary, short = generate_event_summary(
+            FakeLLM(RuntimeError("boom")),
+            event_title="t",
+            article_summaries=articles,
+            fallback_summary="F1. F2. F3. F4.",
+        )
+        self.assertEqual(summary, "F1. F2. F3.")
+        self.assertIsNone(short)
 
     def test_abuse_disabled_skips_abuse_and_keyword_classification(self):
         class FakeAnalyzer(ArticleLLMAnalyzer):
