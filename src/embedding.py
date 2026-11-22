@@ -1,89 +1,92 @@
-"""Shared embedding utilities backed by the Upstage Embedding API."""
+"""Shared embedding utilities backed by a local ko-sRoBERTa sentence-transformer.
+
+비용 절감을 위해 외부 임베딩 API 대신 로컬 `jhgan/ko-sroberta-multitask`(768차원)를
+사용한다. ko-sRoBERTa는 대칭(STS) 모델이라 query/passage 구분이 없으므로 두 함수
+모두 동일 모델로 임베딩한다. 호출부 호환을 위해 함수 시그니처는 그대로 유지한다.
+"""
 
 from __future__ import annotations
 
 import os
+import re
+import sys
 
 from dotenv import load_dotenv
-from openai import OpenAI
 
 
 load_dotenv(override=True)
 
-DEFAULT_EMBEDDING_BASE_URL = "https://api.upstage.ai/v1"
-DEFAULT_EMBEDDING_MODEL = "solar-embedding-1-large-passage"
-DEFAULT_EMBEDDING_QUERY_MODEL = "solar-embedding-1-large-query"
-DEFAULT_EMBEDDING_PASSAGE_MODEL = "solar-embedding-1-large-passage"
-DEFAULT_EMBEDDING_DIMENSIONS = 4096
+# transformers가 (이 환경에 깨진) TensorFlow를 끌어오지 않게 한다. 우리는 torch만 쓴다.
+os.environ.setdefault("USE_TF", "0")
 
-_client: OpenAI | None = None
+DEFAULT_EMBEDDING_MODEL = "jhgan/ko-sroberta-multitask"
+DEFAULT_EMBEDDING_DIMENSIONS = 768
 
-
-def _get_client() -> OpenAI:
-    """Create the OpenAI-compatible client once per process."""
-    global _client
-    if _client is None:
-        load_dotenv(override=True)
-        api_key = (
-            os.getenv("EMBEDDING_API_KEY")
-            or os.getenv("UPSTAGE_API_KEY")
-            or os.getenv("LLM_API_KEY")
-            or os.getenv("OPENAI_API_KEY")
-        )
-        if not api_key:
-            raise ValueError(
-                "Set EMBEDDING_API_KEY or UPSTAGE_API_KEY before embedding text."
-            )
-
-        _client = OpenAI(
-            api_key=api_key,
-            base_url=_load_base_url(),
-            timeout=_load_timeout_seconds(),
-            max_retries=_load_max_retries(),
-        )
-    return _client
+_model = None  # lazy SentenceTransformer 싱글톤
 
 
-def embed(text: str, *, model: str | None = None) -> list[float]:
-    """Embed text with Upstage and return a 4096-dimensional vector by default."""
-    return _embed(text, model=model or _load_model())
+def _get_model():
+    """Load the sentence-transformer once per process."""
+    global _model
+    if _model is None:
+        # 무거운 의존성(torch)이라 실제 임베딩 시점까지 import를 지연한다.
+        from sentence_transformers import SentenceTransformer
+
+        _model = SentenceTransformer(_load_model_name())
+    return _model
 
 
 def embed_query(text: str) -> list[float]:
-    """Embed text used to search existing stored passages."""
-    return _embed(text, model=_load_query_model())
+    """Embed text used to search existing stored passages (대칭 모델: passage와 동일)."""
+    return _embed(text)
 
 
 def embed_passage(text: str) -> list[float]:
     """Embed text that will be stored as a searchable passage."""
-    return _embed(text, model=_load_passage_model())
+    return _embed(text)
 
 
-def _embed(text: str, *, model: str) -> list[float]:
+def _embed(text: str) -> list[float]:
     cleaned = " ".join((text or "").split())
     if not cleaned:
         raise ValueError("Cannot embed empty text.")
 
-    response = _get_client().embeddings.create(input=cleaned, model=model)
-    vector = response.data[0].embedding
-    _validate_dimensions(vector, model)
+    model = _get_model()
+    # 모델 최대 길이(ko-sRoBERTa 128토큰)를 넘는 입력은 뒷부분이 조용히 잘리므로 경고만 남긴다.
+    token_count = _token_count(model, cleaned)
+    if token_count > model.max_seq_length:
+        print(
+            f"[embedding] input truncated: {token_count} > {model.max_seq_length} tokens",
+            file=sys.stderr,
+        )
+    vector = model.encode(cleaned).tolist()
+    _validate_dimensions(vector)
     return vector
 
 
-def _load_model() -> str:
+def _token_count(model, text: str) -> int:
+    """특수 토큰 포함 실제 토큰 수. 토크나이저 기본값이 최대 길이에서 잘라 세므로 truncation을 끈다."""
+    return len(model.tokenizer(text, truncation=False)["input_ids"])
+
+
+def fit_sentences_to_max_tokens(text: str) -> str:
+    """모델 최대 길이 안에 드는 앞쪽 문장들만 남긴다(문장 중간에서 잘리지 않게).
+
+    첫 문장은 항상 남긴다. 첫 문장만으로도 넘치면 그대로 두고 _embed가 경고한다.
+    """
+    model = _get_model()
+    sentences = [s for s in re.split(r"(?<=[.!?。！？])\s+", " ".join((text or "").split())) if s]
+    kept: list[str] = []
+    for sentence in sentences:
+        candidate = " ".join(kept + [sentence])
+        if kept and _token_count(model, candidate) > model.max_seq_length:
+            break
+        kept.append(sentence)
+    return " ".join(kept)
+
+
+def _load_model_name() -> str:
     return os.getenv("EMBEDDING_MODEL") or DEFAULT_EMBEDDING_MODEL
-
-
-def _load_query_model() -> str:
-    return os.getenv("EMBEDDING_QUERY_MODEL") or DEFAULT_EMBEDDING_QUERY_MODEL
-
-
-def _load_passage_model() -> str:
-    return (
-        os.getenv("EMBEDDING_PASSAGE_MODEL")
-        or os.getenv("EMBEDDING_MODEL")
-        or DEFAULT_EMBEDDING_PASSAGE_MODEL
-    )
 
 
 def _load_dimensions() -> int:
@@ -97,53 +100,11 @@ def _load_dimensions() -> int:
     return dimensions
 
 
-def _load_base_url() -> str:
-    return (
-        os.getenv("EMBEDDING_BASE_URL")
-        or os.getenv("UPSTAGE_BASE_URL")
-        or os.getenv("LLM_BASE_URL")
-        or os.getenv("OPENAI_BASE_URL")
-        or DEFAULT_EMBEDDING_BASE_URL
-    )
-
-
-def _load_timeout_seconds() -> float:
-    raw_value = (
-        os.getenv("EMBEDDING_TIMEOUT_SECONDS")
-        or os.getenv("LLM_TIMEOUT_SECONDS")
-        or os.getenv("OPENAI_TIMEOUT_SECONDS")
-        or "60"
-    )
-    try:
-        timeout = float(raw_value)
-    except ValueError as exc:
-        raise ValueError("EMBEDDING_TIMEOUT_SECONDS must be a number.") from exc
-    if timeout <= 0:
-        raise ValueError("EMBEDDING_TIMEOUT_SECONDS must be greater than 0.")
-    return timeout
-
-
-def _load_max_retries() -> int:
-    raw_value = (
-        os.getenv("EMBEDDING_MAX_RETRIES")
-        or os.getenv("LLM_MAX_RETRIES")
-        or os.getenv("OPENAI_MAX_RETRIES")
-        or "0"
-    )
-    try:
-        max_retries = int(raw_value)
-    except ValueError as exc:
-        raise ValueError("EMBEDDING_MAX_RETRIES must be an integer.") from exc
-    if max_retries < 0:
-        raise ValueError("EMBEDDING_MAX_RETRIES must be greater than or equal to 0.")
-    return max_retries
-
-
-def _validate_dimensions(vector: list[float], model_name: str) -> None:
+def _validate_dimensions(vector: list[float]) -> None:
     expected_dimensions = _load_dimensions()
     if len(vector) != expected_dimensions:
         raise ValueError(
-            f"{model_name} returned {len(vector)} dimensions, "
+            f"Embedding model returned {len(vector)} dimensions, "
             f"but EMBEDDING_DIMENSIONS is {expected_dimensions}."
         )
 
