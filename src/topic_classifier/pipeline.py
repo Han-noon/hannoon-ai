@@ -4,6 +4,7 @@ import sys
 
 from db import events, topics, topic_causes
 from embedding import embed_passage, embed_query, to_vector_literal
+from event_summary import generate_event_summary, load_event_article_summaries
 from openai_client.client import LLMClient
 from topic_classifier.prompts import (
     build_topic_assignment_prompt,
@@ -139,6 +140,17 @@ def run(conn, min_net: int, batch_size: int, top_k: int, llm_model: str) -> int:
     for ev in batch:
         try:
             print(f"[topic] event {ev.id} 처리 중: {ev.title}")
+
+            # rev3: 이벤트가 토픽 분류 대상(N개↑)이 된 시점에 멤버 기사 요약을 1회 롤업한다.
+            rolled, short_summary = generate_event_summary(
+                client,
+                event_title=ev.title,
+                article_summaries=load_event_article_summaries(conn, ev.id),
+                fallback_summary=ev.summary,
+            )
+            if (rolled and rolled != ev.summary) or short_summary:
+                events.update_event_summary(conn, ev.id, rolled or ev.summary, short_summary)
+                ev.summary = rolled or ev.summary
 
             cr = _call_json(
                 client,
