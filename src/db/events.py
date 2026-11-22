@@ -2,7 +2,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from event_classifier.settings import (
+    ENTITY_CANDIDATE_LIMIT,
+    ENTITY_DF_CUTOFF_DAYS,
+    ENTITY_DF_CUTOFF_EVENTS,
+    ENTITY_DISTANCE_CEILING,
+    K_VEC,
+    MIN_SHARED_ENTITIES,
+)
 from summary_utils import normalize_summary
+
+# 결합 점수(distance와 entity 자카드를 합친 내부 랭킹용 점수, 값이 낮을수록 좋음) 가중치.
+# 실측 후 조정 가능한 placeholder(Implementation Step 5, 2026-07-22 확정).
+W_DISTANCE = 0.7
+W_ENTITY = 0.3
 
 
 @dataclass
@@ -13,20 +26,20 @@ class Event:
     category: str
     title: str
     summary: str
-    # 대표 기사(제목 + 첫 문단). cause/result 추출 입력으로 사용한다.
+    # 대표 기사 제목 + 전체 AI요약(자연문). cause/result 추출 입력으로 사용한다.
     embedding_text: str
 
 
 # ── SQL 상수 ────────────────────────────────────────────────────────────────
 
-# 미배정 이벤트 조회: topic_id가 null이고, 실제 기사 수((article_count - abusing_count))가
-# 임계값 이상인 이벤트를 (created_at, id) 기준 오름차순으로 가져온다.
+# 미배정 이벤트 조회: topic_id가 null이고, 기사 수가 임계값 이상인 이벤트를
+# (created_at, id) 기준 오름차순으로 가져온다.
 # 순서를 보장해야 prev/next 체인이 시간순으로 연결된다.
 FETCH_UNASSIGNED_SQL = """
 SELECT id, category, title, summary, embedding_text
 FROM events
 WHERE topic_id IS NULL
-  AND (article_count - abusing_count) >= ?
+  AND article_count >= ?
 ORDER BY created_at ASC, id ASC
 LIMIT ?
 """
@@ -68,23 +81,77 @@ UPDATE_NEXT_EVENT_SQL = "UPDATE events SET next_event_id = ? WHERE id = ?"
 # 직후 이벤트의 prev_event_id를 설정한다 (params: new_prev_id, target_id).
 UPDATE_PREV_EVENT_SQL = "UPDATE events SET prev_event_id = ? WHERE id = ?"
 
-SEARCH_CANDIDATE_EVENTS_SQL = """
-SELECT id, category, title, core_content, summary, article_count,
-       (embedding <=> ?::vector) AS distance
-FROM events
-WHERE embedding IS NOT NULL
-  AND (updated_at + INTERVAL '2 day' >= ?)
-  AND (embedding <=> ?::vector) <= ?
-ORDER BY distance ASC
+# 결정점 0/2(2026-07-22 확정, .omc/plans/event-classification-ner-redesign-plan.md):
+# 시간창(2일)과 DISTANCE_THRESHOLD 단일 게이트를 폐지하고, 앱 레벨 2-fetch로 대체한다.
+#   (a) 벡터 fetch: event_articles를 join하지 않은 단독 top-K_vec ANN(hnsw 활용 보장).
+#   (b) 엔티티 fetch: article_entities 역색인 + 4중 하드 필터(최소 공유 수, df컷, LIMIT M,
+#       느슨한 거리 상한)로 벡터 게이트 없이 후보를 회수.
+#   (c) 앱단 병합: 두 결과를 article_id 기준으로 합쳐 기사 멤버 단위 결합 점수를 계산하고
+#       event_id로 집계, 최선 멤버를 이벤트 대표값으로 채택한다(멤버 단위 원칙 유지).
+SEARCH_VECTOR_CANDIDATES_SQL = """
+SELECT a.id AS article_id, a.embedding <=> ?::vector AS distance
+FROM articles a
+WHERE a.embedding IS NOT NULL
+ORDER BY a.embedding <=> ?::vector
 LIMIT ?
 """
 
-UPDATE_EVENT_ABUSING_COUNT_SQL = """
-UPDATE events e
-SET left_count  = CASE WHEN (SELECT bias_type FROM articles WHERE id = ?) = '진보' THEN left_count  + 1 ELSE left_count  END,
-    mid_count   = CASE WHEN (SELECT bias_type FROM articles WHERE id = ?) = '중도' THEN mid_count   + 1 ELSE mid_count   END,
-    right_count = CASE WHEN (SELECT bias_type FROM articles WHERE id = ?) = '보수' THEN right_count + 1 ELSE right_count END
-WHERE e.id = ?
+# hnsw 색인 스캔은 탐색 폭(hnsw.ef_search, 기본 40)보다 많은 행을 돌려주지 않는다.
+# 기본값이면 LIMIT K_VEC(100)을 요청해도 약 40행만 나오므로(기사가 쌓여 색인을 쓰는 규모에서만 발생),
+# 벡터 fetch 직전에 탐색 폭을 K_VEC의 2배(기본값 40 이상, pgvector 상한 1000)로 올린다. 2배는 근사 검색이
+# 진짜 상위 K를 놓치지 않게 두는 여유(313건 실측: 100은 가끔 1개 누락, 150 이상 전부 일치). 연결이 autocommit이라
+# SET LOCAL은 효과가 없어 세션 단위로 설정한다.
+HNSW_EF_SEARCH = max(40, min(1000, 2 * K_VEC))
+SET_HNSW_EF_SEARCH_SQL = "SELECT set_config('hnsw.ef_search', ?, false)"
+
+# 새 기사 entities 중 "너무 흔한" 엔티티를 찾아 공유 엔티티 집합에서 제외한다(df 컷).
+# 최근 N일 내 서로 다른 event_id에 20회 이상 등장하면 흔한 엔티티로 간주(모두 placeholder).
+ENTITY_DF_CUTOFF_SQL = """
+SELECT ae.entity
+FROM article_entities ae
+JOIN event_articles ea ON ea.article_id = ae.article_id
+JOIN events e ON e.id = ea.event_id
+WHERE ae.entity = ANY(?)
+  AND e.created_at >= now() - make_interval(days => ?)
+GROUP BY ae.entity
+HAVING COUNT(DISTINCT ea.event_id) >= ?
+"""
+
+# df 컷을 통과한(흔하지 않은) entities와 최소 MIN_SHARED_ENTITIES개 이상 겹치는 기사를
+# 공유 엔티티 수 내림차순으로 최대 M건 회수한다(무한 성장 방지 캡 (i)(ii)(iii)).
+ENTITY_CANDIDATE_SQL = """
+SELECT article_id, COUNT(DISTINCT entity) AS shared_count
+FROM article_entities
+WHERE entity = ANY(?)
+GROUP BY article_id
+HAVING COUNT(DISTINCT entity) >= ?
+ORDER BY shared_count DESC
+LIMIT ?
+"""
+
+# 엔티티 경로로 회수된 후보만 대상으로 임베딩 거리를 계산한다(전체 스캔이 아니라
+# 소수 대상 특정 쿼리). 여기서 계산한 거리가 ENTITY_DISTANCE_CEILING을 넘으면
+# 하드 필터로 완전히 제외한다(캡 (iv), 스코어링 가중치 아님).
+ENTITY_CANDIDATE_DISTANCE_SQL = """
+SELECT id AS article_id, embedding <=> ?::vector AS distance
+FROM articles
+WHERE id = ANY(?) AND embedding IS NOT NULL
+"""
+
+# (a)/(b)에서 살아남은 article_id를 event_articles에 join해 실제 이벤트 멤버만 남기고
+# (이 join이 벡터 fetch에서 분리되어 앱단에서 일어나는 지점), earliest_published_at
+# 계산에 쓸 published_at과 판정 근거인 멤버 사건 내용도 함께 가져온다.
+EVENT_MEMBER_LOOKUP_SQL = """
+SELECT ea.article_id, ea.event_id, a.published_at, a.core_content
+FROM event_articles ea
+JOIN articles a ON a.id = ea.article_id
+WHERE ea.article_id = ANY(?)
+"""
+
+EVENT_ROWS_SQL = """
+SELECT id, category, title, core_content, summary, article_count
+FROM events
+WHERE id = ANY(?)
 """
 
 UPDATE_EVENT_SUMMARY_SQL = """
@@ -103,16 +170,9 @@ INSERT INTO events (
 RETURNING id
 """
 
-# 정상 기사용 관계 테이블 삽입 쿼리
 INSERT_EVENT_ARTICLE_MAP_SQL = """
 INSERT INTO event_articles (event_id, article_id, reason)
 VALUES (?, ?, ?)
-"""
-
-# 어뷰징 기사용 전용 테이블 매핑 쿼리
-INSERT_ABUSING_ARTICLE_MAP_SQL = """
-INSERT INTO abusing_articles (event_id, article_id, type, reason)
-VALUES (?, ?, 'title_content_mismatch'::public.abusing_type, ?)
 """
 
 
@@ -159,21 +219,130 @@ def link_into_chain(conn, current_id: int, prev_id: int | None, next_id: int | N
 def search_candidate_events(
     conn,
     embedding_literal: str,
-    published_at_str: str,
-    max_distance: float,
+    entities: list[str] | None,
     top_k: int,
 ) -> list[dict]:
-    """기사 임베딩과 가까운 기존 이벤트 후보를 pgvector 거리순으로 가져온다."""
-    return conn.query(
-        SEARCH_CANDIDATE_EVENTS_SQL,
-        (embedding_literal, published_at_str, embedding_literal, max_distance, top_k),
+    """기사 임베딩(top-K_vec ANN)과 entities(역색인 자카드, 4중 하드 필터)로 후보 이벤트를
+    찾아 앱 레벨에서 병합한다(결정점 0/2, 2026-07-22 확정).
+
+    반환 이벤트마다 어느 article_id가 대표 결합 점수를 만들었는지 source_article_id로
+    로깅한다(멤버 단위 원칙 추적 가능성 확보).
+    """
+    conn.query(SET_HNSW_EF_SEARCH_SQL, (str(HNSW_EF_SEARCH),))
+    vector_rows = conn.query(
+        SEARCH_VECTOR_CANDIDATES_SQL,
+        (embedding_literal, embedding_literal, K_VEC),
     )
+    vector_by_article: dict[int, float] = {
+        row["article_id"]: float(row["distance"]) for row in vector_rows
+    }
 
+    # entity_by_article: article_id -> (embedding distance, shared entity count)
+    entity_by_article: dict[int, tuple[float, int]] = {}
+    clean_entities = [entity for entity in (entities or []) if entity]
+    if len(clean_entities) >= MIN_SHARED_ENTITIES:
+        df_rows = conn.query(
+            ENTITY_DF_CUTOFF_SQL,
+            (clean_entities, ENTITY_DF_CUTOFF_DAYS, ENTITY_DF_CUTOFF_EVENTS),
+        )
+        excluded_entities = {row["entity"] for row in df_rows}
+        allowed_entities = [e for e in clean_entities if e not in excluded_entities]
 
-def update_event_counters(conn, event_id: int, article_id: int, is_abusing: bool = False):
-    """어뷰징 기사일 때 언론사 성향별 카운터를 갱신한다."""
-    if is_abusing:
-        conn.execute(UPDATE_EVENT_ABUSING_COUNT_SQL, (article_id, article_id, article_id, event_id))
+        if len(allowed_entities) >= MIN_SHARED_ENTITIES:
+            candidate_rows = conn.query(
+                ENTITY_CANDIDATE_SQL,
+                (allowed_entities, MIN_SHARED_ENTITIES, ENTITY_CANDIDATE_LIMIT),
+            )
+            shared_counts = {row["article_id"]: row["shared_count"] for row in candidate_rows}
+            candidate_ids = list(shared_counts.keys())
+
+            if candidate_ids:
+                distance_rows = conn.query(
+                    ENTITY_CANDIDATE_DISTANCE_SQL,
+                    (embedding_literal, candidate_ids),
+                )
+                for row in distance_rows:
+                    distance = float(row["distance"])
+                    if distance <= ENTITY_DISTANCE_CEILING:
+                        article_id = row["article_id"]
+                        entity_by_article[article_id] = (distance, shared_counts[article_id])
+
+    all_article_ids = list(set(vector_by_article) | set(entity_by_article))
+    if not all_article_ids:
+        return []
+
+    member_rows = conn.query(EVENT_MEMBER_LOOKUP_SQL, (all_article_ids,))
+    if not member_rows:
+        return []
+
+    entities_count = len(clean_entities) or 1  # 0 분모 방지(entities 없는 기사)
+
+    # article_id 단위 결합 점수(distance·entity 겹침 가중 합, 낮을수록 좋음)를 계산해
+    # event_id별 최선 멤버를 대표값으로 채택한다(멤버 단위 원칙, centroid 재도입 아님).
+    best_by_event: dict[int, dict] = {}
+    earliest_by_event: dict[int, str] = {}
+    for row in member_rows:
+        article_id = row["article_id"]
+        event_id = row["event_id"]
+        published_at = row["published_at"]
+
+        if published_at is not None:
+            current_earliest = earliest_by_event.get(event_id)
+            if current_earliest is None or published_at < current_earliest:
+                earliest_by_event[event_id] = published_at
+
+        distance = vector_by_article.get(article_id)
+        shared_count = 0
+        if article_id in entity_by_article:
+            entity_distance, shared_count = entity_by_article[article_id]
+            if distance is None:
+                distance = entity_distance
+
+        if distance is None:
+            continue  # 이론상 발생하지 않음(둘 중 한 fetch 경로에서 왔어야 함)
+
+        entity_score = shared_count / entities_count
+        combined_score = W_DISTANCE * distance + W_ENTITY * (1 - entity_score)
+
+        best = best_by_event.get(event_id)
+        if best is None or combined_score < best["combined_score"]:
+            best_by_event[event_id] = {
+                "article_id": article_id,
+                "distance": distance,
+                "combined_score": combined_score,
+                "published_at": published_at,
+                "core_content": row["core_content"],
+            }
+
+    if not best_by_event:
+        return []
+
+    event_rows = conn.query(EVENT_ROWS_SQL, (list(best_by_event.keys()),))
+    event_by_id = {row["id"]: row for row in event_rows}
+
+    results = []
+    for event_id, best in best_by_event.items():
+        event = event_by_id.get(event_id)
+        if event is None:
+            continue
+        results.append(
+            {
+                "id": event["id"],
+                "category": event["category"],
+                "title": event["title"],
+                "core_content": event["core_content"],
+                "summary": event["summary"],
+                "article_count": event["article_count"],
+                "distance": best["distance"],
+                "earliest_published_at": earliest_by_event.get(event_id),
+                "source_article_id": best["article_id"],
+                "source_published_at": best["published_at"],
+                "source_core_content": best["core_content"],
+            }
+        )
+
+    results.sort(key=lambda r: best_by_event[r["id"]]["combined_score"])
+    return results[:top_k]
 
 
 def create_new_event(
@@ -211,15 +380,6 @@ def update_event_summary(conn, event_id: int, summary: str) -> None:
     conn.execute(UPDATE_EVENT_SUMMARY_SQL, (summary, event_id))
 
 
-def link_article_to_event(
-    conn,
-    event_id: int,
-    article_id: int,
-    reason: str,
-    is_abusing: bool = False,
-):
-    """기사와 이벤트를 정상/어뷰징 매핑 테이블 중 하나에 연결한다."""
-    if is_abusing:
-        conn.execute(INSERT_ABUSING_ARTICLE_MAP_SQL, (event_id, article_id, reason))
-    else:
-        conn.execute(INSERT_EVENT_ARTICLE_MAP_SQL, (event_id, article_id, reason))
+def link_article_to_event(conn, event_id: int, article_id: int, reason: str):
+    """기사와 이벤트를 관계 테이블에 연결한다."""
+    conn.execute(INSERT_EVENT_ARTICLE_MAP_SQL, (event_id, article_id, reason))
