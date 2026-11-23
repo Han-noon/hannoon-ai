@@ -19,5 +19,14 @@ dependencies = [
     "safetensors>=0.4.3",
 ]
 
+[project.scripts]
+hannoon-subtopics = "subtopic_classifier.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]  # src layout: 패키지 루트를 src/ 디렉토리로 지정
+
+[tool.setuptools.package-data]
+subtopic_classifier = [
+    "prompts/*.md",
+    "schemas/*.json",
+]
