@@ -647,7 +647,8 @@ def load_feed_urls(feeds_file: str | None, feeds: list[str] | None) -> list[str]
     if feeds:
         urls.extend(feeds)
     if feeds_file and os.path.exists(feeds_file):
-        with open(feeds_file, "r", encoding="utf-8") as handle:
+        # Windows 편집기/PowerShell이 붙이는 UTF-8 BOM도 허용한다.
+        with open(feeds_file, "r", encoding="utf-8-sig") as handle:
             data = json.load(handle)
         if isinstance(data, list):
             urls.extend(data)

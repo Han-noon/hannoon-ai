@@ -1,7 +1,5 @@
-"""이벤트 분류 파이프라인 실행 진입점.
-
-팀 구조 패턴에 맞춰 src/를 import path에 추가한 뒤
-event_classifier.pipeline.main()으로 처리를 위임합니다.
+"""
+이벤트 분류 파이프라인 실행 진입점
 
 실행: python classify_events.py
 """

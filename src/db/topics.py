@@ -5,6 +5,8 @@
 
 from dataclasses import dataclass
 
+from summary_utils import normalize_summary, normalize_topic_title
+
 
 @dataclass
 class Topic:
@@ -14,8 +16,6 @@ class Topic:
     title: str
     summary: str
 
-
-# ── SQL 상수 ────────────────────────────────────────────────────────────────
 
 # 새 토픽을 삽입하고 생성된 id를 반환한다.
 # category는 public.category enum 타입이므로 ?::category 캐스트가 필요하다.
@@ -32,14 +32,22 @@ RETURNING id
 UPDATE_TOPIC_SQL = "UPDATE topics SET title = ?, summary = ? WHERE id = ?"
 
 
-# ── Repository 함수 ─────────────────────────────────────────────────────────
-
 def create_topic(conn, category: str, title: str, summary: str) -> int:
     """새 토픽을 생성하고 생성된 id를 반환한다. 트랜잭션 내에서 호출한다."""
+    title = normalize_topic_title(title) or normalize_topic_title(summary)
+    if not title:
+        raise ValueError("Topic title is empty.")
+    summary = normalize_summary(summary) or normalize_summary(title)
     row = conn.query_one(INSERT_TOPIC_SQL, (category, title, summary))
     return row["id"]
 
 
 def update_topic(conn, topic_id: int, title: str, summary: str) -> None:
     """기존 토픽의 제목·요약을 갱신한다. 트랜잭션 내에서 호출한다."""
+    title = normalize_topic_title(title)
+    if not title:
+        raise ValueError("Topic title is empty.")
+    summary = normalize_summary(summary)
+    if not summary:
+        raise ValueError("Topic summary is empty.")
     conn.execute(UPDATE_TOPIC_SQL, (title, summary, topic_id))

@@ -1,16 +1,14 @@
-"""events 테이블 repository.
-
-토픽 배정에 필요한 이벤트 조회·갱신 함수와 SQL 상수를 제공한다.
-이벤트 분류 로직과 공용으로 사용하는 모듈이므로, 이 파일에는
-토픽 배정에 필요한 최소 함수만 정의한다.
-"""
+from __future__ import annotations
 
 from dataclasses import dataclass
+
+from summary_utils import normalize_summary
 
 
 @dataclass
 class Event:
-    """토픽 배정 처리 단위. events 테이블의 최소 컬럼만 포함한다."""
+    """토픽 분류 단계에서 사용하는 이벤트 행."""
+
     id: int
     category: str
     title: str
@@ -70,55 +68,87 @@ UPDATE_NEXT_EVENT_SQL = "UPDATE events SET next_event_id = ? WHERE id = ?"
 # 직후 이벤트의 prev_event_id를 설정한다 (params: new_prev_id, target_id).
 UPDATE_PREV_EVENT_SQL = "UPDATE events SET prev_event_id = ? WHERE id = ?"
 
+SEARCH_CANDIDATE_EVENTS_SQL = """
+SELECT id, category, title, core_content, summary, article_count,
+       (embedding <=> ?::vector) AS distance
+FROM events
+WHERE embedding IS NOT NULL
+  AND (updated_at + INTERVAL '2 day' >= ?)
+  AND (embedding <=> ?::vector) <= ?
+ORDER BY distance ASC
+LIMIT ?
+"""
 
-# ── Repository 함수 ─────────────────────────────────────────────────────────
+UPDATE_EVENT_ABUSING_COUNT_SQL = """
+UPDATE events e
+SET left_count  = CASE WHEN (SELECT bias_type FROM articles WHERE id = ?) = '진보' THEN left_count  + 1 ELSE left_count  END,
+    mid_count   = CASE WHEN (SELECT bias_type FROM articles WHERE id = ?) = '중도' THEN mid_count   + 1 ELSE mid_count   END,
+    right_count = CASE WHEN (SELECT bias_type FROM articles WHERE id = ?) = '보수' THEN right_count + 1 ELSE right_count END
+WHERE e.id = ?
+"""
+
+UPDATE_EVENT_SUMMARY_SQL = """
+UPDATE events
+SET summary = ?,
+    updated_at = now()
+WHERE id = ?
+"""
+
+# 신규 이벤트 생성 (RETURNING id로 방금 생성된 id 획득)
+INSERT_NEW_EVENT_SQL = """
+INSERT INTO events (
+    topic_id, category, title, summary,
+    core_content, embedding_text, embedding, article_count, event_image_url
+) VALUES (NULL, ?::category, ?, ?, ?, ?, ?::vector, 0, ?)
+RETURNING id
+"""
+
+# 정상 기사용 관계 테이블 삽입 쿼리
+INSERT_EVENT_ARTICLE_MAP_SQL = """
+INSERT INTO event_articles (event_id, article_id, reason)
+VALUES (?, ?, ?)
+"""
+
+# 어뷰징 기사용 전용 테이블 매핑 쿼리
+INSERT_ABUSING_ARTICLE_MAP_SQL = """
+INSERT INTO abusing_articles (event_id, article_id, type, reason)
+VALUES (?, ?, 'title_content_mismatch'::public.abusing_type, ?)
+"""
+
 
 def fetch_unassigned(conn, min_net: int, batch_size: int) -> list[Event]:
-    """미배정 이벤트를 (created_at, id) 기준 오름차순으로 최대 batch_size건 조회한다.
-
-    min_net: (article_count - abusing_count) 최소값. 기준 미달 이벤트는 제외한다.
-    """
+    """토픽이 아직 없는 이벤트 중 정상 기사 수가 기준 이상인 항목을 가져온다."""
     rows = conn.query(FETCH_UNASSIGNED_SQL, (min_net, batch_size))
-    return [Event(id=r["id"], category=r["category"], title=r["title"], summary=r["summary"],
-                  embedding_text=r["embedding_text"])
-            for r in rows]
+    return [
+        Event(
+            id=row["id"],
+            category=row["category"],
+            title=row["title"],
+            summary=row["summary"],
+            embedding_text=row["embedding_text"],
+        )
+        for row in rows
+    ]
 
 
 def assign_topic(conn, event_id: int, topic_id: int, reason: str | None) -> None:
-    """이벤트에 토픽을 배정하고 배정 근거(reason)를 기록한다. 트랜잭션 내에서 호출한다."""
+    """이벤트를 토픽에 배정한다."""
     conn.execute(ASSIGN_TOPIC_SQL, (topic_id, reason, event_id))
 
 
 def find_prev_event(conn, topic_id: int, event_id: int):
-    """같은 토픽에서 (created_at, id) 기준 직전 노드를 반환한다.
-
-    반환값: {"id": int, "next_event_id": int | None} 또는 None.
-    트랜잭션 내에서 호출해야 assign_topic 결과가 반영된 상태를 읽는다.
-    """
+    """같은 토픽에서 현재 이벤트보다 앞선 이벤트를 찾는다."""
     return conn.query_one(FIND_PREV_EVENT_SQL, (topic_id, event_id))
 
 
 def find_next_event_id(conn, topic_id: int, event_id: int) -> int | None:
-    """같은 토픽에서 (created_at, id) 기준 직후 노드 id를 반환한다.
-
-    엣지 케이스: 임계치 미달로 제외됐다 뒤늦게 배정된 이벤트가 기존 토픽의 가장 과거
-    노드보다도 더 과거인 경우, find_prev_event() 결과가 None이 된다.
-    이때 이 쿼리로 기존 head(직후 노드)를 찾아 새 이벤트를 체인 앞에 삽입한다.
-    트랜잭션 내에서 호출한다.
-    """
+    """같은 토픽에서 현재 이벤트보다 뒤에 오는 이벤트 id를 찾는다."""
     row = conn.query_one(FIND_NEXT_EVENT_SQL, (topic_id, event_id))
     return row["id"] if row else None
 
 
 def link_into_chain(conn, current_id: int, prev_id: int | None, next_id: int | None) -> None:
-    """current를 prev↔current↔next 위치에 doubly-linked list 삽입한다.
-
-    - current.prev = prev_id / current.next = next_id
-    - prev 있으면 prev.next = current_id
-    - next 있으면 next.prev = current_id
-
-    호출 측 트랜잭션 내에서 원자적으로 실행한다.
-    """
+    """토픽 내부 이벤트 연결 리스트(prev/next)를 갱신한다."""
     conn.execute(UPDATE_CHAIN_SQL, (prev_id, next_id, current_id))
     if prev_id is not None:
         conn.execute(UPDATE_NEXT_EVENT_SQL, (current_id, prev_id))
@@ -126,55 +156,70 @@ def link_into_chain(conn, current_id: int, prev_id: int | None, next_id: int | N
         conn.execute(UPDATE_PREV_EVENT_SQL, (current_id, next_id))
 
 
-# ── (이벤트 분류기 파이프라인 전용 확장) ──────────────────────────────────
+def search_candidate_events(
+    conn,
+    embedding_literal: str,
+    published_at_str: str,
+    max_distance: float,
+    top_k: int,
+) -> list[dict]:
+    """기사 임베딩과 가까운 기존 이벤트 후보를 pgvector 거리순으로 가져온다."""
+    return conn.query(
+        SEARCH_CANDIDATE_EVENTS_SQL,
+        (embedding_literal, published_at_str, embedding_literal, max_distance, top_k),
+    )
 
-# 기사 시간 기준 2일 이내의 후보 이벤트를 pgvector 거리 순으로 검색
-SEARCH_CANDIDATE_EVENTS_SQL = """
-SELECT id, title, core_content, summary,
-       (embedding <=> ?::vector) as distance
-FROM events
-WHERE (updated_at + INTERVAL '2 day' >= ?)
-  AND (embedding <=> ?::vector) <= ?
-ORDER BY distance ASC
-LIMIT ?
-"""
 
-# 기존 이벤트 업데이트
-UPDATE_EVENT_DEADLINE_SQL = """
-UPDATE events 
-SET updated_at = ?, 
-    article_count = article_count + 1 
-WHERE id = ?
-"""
+def update_event_counters(conn, event_id: int, article_id: int, is_abusing: bool = False):
+    """어뷰징 기사일 때 언론사 성향별 카운터를 갱신한다."""
+    if is_abusing:
+        conn.execute(UPDATE_EVENT_ABUSING_COUNT_SQL, (article_id, article_id, article_id, event_id))
 
-# 신규 이벤트 생성 (RETURNING id로 방금 생성된 id 획득)
-INSERT_NEW_EVENT_SQL = """
-INSERT INTO events (
-    topic_id, category, title, summary, 
-    core_content, embedding_text, embedding, article_count
-) VALUES (NULL, ?::category, ?, ?, ?, ?, ?::vector, 1)
-RETURNING id
-"""
 
-# 기사-이벤트 관계 테이블 맵핑 삽입
-INSERT_EVENT_ARTICLE_MAP_SQL = """
-INSERT INTO event_articles (event_id, article_id, reason)
-VALUES (?, ?, ?)
-"""
-
-def search_candidate_events(conn, embedding: list[float], published_at_str: str, max_distance: float, top_k: int):
-    """유사한 후보 이벤트 목록을 검색합니다."""
-    return conn.query(SEARCH_CANDIDATE_EVENTS_SQL, (embedding, published_at_str, embedding, max_distance, top_k))
-
-def update_event_deadline(conn, event_id: int, published_at_str: str):
-    """기존 이벤트의 데드라인 시간과 카운트를 갱신합니다."""
-    conn.execute(UPDATE_EVENT_DEADLINE_SQL, (published_at_str, event_id))
-
-def create_new_event(conn, category: str, title: str, summary: str, core_content: str, embedding_text: str, embedding: list[float]) -> int:
-    """새로운 이벤트를 개설하고 생성된 ID를 반환합니다."""
-    row = conn.query_one(INSERT_NEW_EVENT_SQL, (category, title, summary, core_content, embedding_text, embedding))
+def create_new_event(
+    conn,
+    category: str,
+    title: str,
+    summary: str,
+    core_content: str,
+    embedding_text: str,
+    embedding_literal: str,
+    event_image_url: str | None = None,
+) -> int:
+    """새 이벤트를 만들고 생성된 id를 반환한다."""
+    summary = normalize_summary(summary) or normalize_summary(title)
+    row = conn.query_one(
+        INSERT_NEW_EVENT_SQL,
+        (
+            category,
+            title,
+            summary,
+            core_content,
+            embedding_text,
+            embedding_literal,
+            event_image_url,
+        ),
+    )
     return row["id"]
 
-def link_article_to_event(conn, event_id: int, article_id: int, reason: str):
-    """기사와 이벤트를 맵핑 테이블에 연결합니다."""
-    conn.execute(INSERT_EVENT_ARTICLE_MAP_SQL, (event_id, article_id, reason))
+
+def update_event_summary(conn, event_id: int, summary: str) -> None:
+    """이벤트 요약을 공통 길이 규칙에 맞춰 갱신한다."""
+    summary = normalize_summary(summary)
+    if not summary:
+        raise ValueError("Event summary is empty.")
+    conn.execute(UPDATE_EVENT_SUMMARY_SQL, (summary, event_id))
+
+
+def link_article_to_event(
+    conn,
+    event_id: int,
+    article_id: int,
+    reason: str,
+    is_abusing: bool = False,
+):
+    """기사와 이벤트를 정상/어뷰징 매핑 테이블 중 하나에 연결한다."""
+    if is_abusing:
+        conn.execute(INSERT_ABUSING_ARTICLE_MAP_SQL, (event_id, article_id, reason))
+    else:
+        conn.execute(INSERT_EVENT_ARTICLE_MAP_SQL, (event_id, article_id, reason))

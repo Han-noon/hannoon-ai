@@ -1,7 +1,10 @@
+import json
 import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
+
+from summary_utils import normalize_summary
 
 # DB 연결은 SQLite/Postgres 모두 autocommit으로 둔다(아래 ensure_* 참고).
 # 따라서 단발 쓰기는 즉시 커밋되고, 원자적으로 묶어야 하는 다중 쓰기만
@@ -549,64 +552,102 @@ def load_pending_ai_pipeline_jobs(conn, limit: int) -> list:
     )
 
 
-def save_article_ai_result(
+def save_article_analysis_result(
     conn,
     *,
     article_id: int,
+    summary: str,
     abuse_score: float,
     abuse_label: str,
+    keywords: list[str] | str | None,
+    status: str = "done",
 ) -> None:
-    """article_ai_results에서 어뷰징 관련 필드만 저장한다."""
+    """LLM 기사 분석 결과 전체를 article_ai_results에 저장한다."""
     now = now_iso()
-    conn.execute(
-        """
-        INSERT INTO article_ai_results (
-            article_id,
-            abuse_score,
-            abuse_label,
-            created_at,
-            updated_at
-        ) VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(article_id) DO UPDATE SET
-            abuse_score = excluded.abuse_score,
-            abuse_label = excluded.abuse_label
-        """,
-        (
-            article_id,
-            abuse_score,
-            abuse_label,
-            now,
-            now,
-        ),
-    )
-
-
-def save_article_summary_result(conn, *, article_id: int, summary: str) -> None:
-    """article_ai_results에서 요약 필드만 저장한다."""
-    now = now_iso()
+    summary = normalize_summary(summary)
+    if not summary:
+        raise ValueError("Article analysis summary is empty.")
+    stored_keywords = _adapt_keywords_for_storage(conn, keywords)
     conn.execute(
         """
         INSERT INTO article_ai_results (
             article_id,
             summary,
+            abuse_score,
+            abuse_label,
+            keywords,
+            status,
+            last_error,
             created_at,
             updated_at
-        ) VALUES (?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(article_id) DO UPDATE SET
             summary = excluded.summary,
+            abuse_score = excluded.abuse_score,
+            abuse_label = excluded.abuse_label,
+            keywords = excluded.keywords,
+            status = excluded.status,
+            last_error = excluded.last_error,
             updated_at = excluded.updated_at
         """,
         (
             article_id,
             summary,
+            abuse_score,
+            abuse_label,
+            stored_keywords,
+            status,
+            None,
             now,
             now,
         ),
     )
 
 
+def _adapt_keywords_for_storage(conn, keywords: list[str] | str | None):
+    """Store keywords as text[] in Postgres and JSON text in local SQLite."""
+    if keywords is None:
+        return None
+
+    if isinstance(keywords, str):
+        try:
+            parsed = json.loads(keywords)
+        except json.JSONDecodeError:
+            parsed = [keywords] if keywords.strip() else []
+    else:
+        parsed = keywords
+
+    if isinstance(parsed, list):
+        normalized = [
+            " ".join(str(item).split())
+            for item in parsed
+            if " ".join(str(item).split())
+        ]
+    else:
+        normalized = []
+
+    if isinstance(conn, PostgresConnection):
+        return normalized
+    return json.dumps(normalized, ensure_ascii=False)
+
+
 def mark_article_job_sent(conn, job_id: int) -> None:
     """후속 AI 처리가 끝난 기사 작업을 완료 상태로 표시한다."""
+    if isinstance(conn, PostgresConnection):
+        now = now_iso()
+        conn.execute(
+            """
+            UPDATE article_jobs
+            SET status = ?::public.article_job_status,
+                last_error = ?,
+                last_attempt_at = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            ("sent", None, now, now, job_id),
+        )
+        return
+
     now = now_iso()
     conn.execute(
         """
@@ -620,13 +661,41 @@ def mark_article_job_sent(conn, job_id: int) -> None:
 
 def mark_article_job_failed(conn, job_id: int, error: str, max_attempts: int) -> None:
     """분류 실패 시도 정보를 기록한다."""
+    if isinstance(conn, PostgresConnection):
+        now = now_iso()
+        conn.execute(
+            """
+            UPDATE article_jobs
+            SET status = CASE
+                    WHEN COALESCE(attempts, 0) + 1 >= ?
+                        THEN 'failed'::public.article_job_status
+                    ELSE 'pending'::public.article_job_status
+                END,
+                attempts = COALESCE(attempts, 0) + 1,
+                last_error = ?,
+                last_attempt_at = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (max_attempts, error, now, now, job_id),
+        )
+        return
+
     now = now_iso()
-    status = """
-        CASE
-            WHEN COALESCE(attempts, 0) + 1 >= ? THEN 'failed'
-            ELSE 'pending'
-        END
-    """
+    if isinstance(conn, PostgresConnection):
+        status = """
+            CASE
+                WHEN COALESCE(attempts, 0) + 1 >= ? THEN 'failed'::public.article_job_status
+                ELSE 'pending'::public.article_job_status
+            END
+        """
+    else:
+        status = """
+            CASE
+                WHEN COALESCE(attempts, 0) + 1 >= ? THEN 'failed'
+                ELSE 'pending'
+            END
+        """
     conn.execute(
         f"""
         UPDATE article_jobs
