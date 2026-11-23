@@ -55,7 +55,8 @@ DEFAULT_LLM_MODEL = "gpt-4o-mini"
 # 위 OpenAI 상수는 롤백/직접 OpenAI 사용 대비 그대로 둔다.
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_DEFAULT_MODEL = "qwen/qwen3-30b-a3b-instruct-2507"
-OPENROUTER_PROVIDER_ONLY = ["streamlake"]
+# streamlake가 qwen3-30b-a3b-instruct-2507 제공을 중단(2026-11-23 확인, 404)해 nebius로 고정한다.
+OPENROUTER_PROVIDER_ONLY = ["nebius"]
 OPENROUTER_ALLOW_FALLBACKS = False
 
 
