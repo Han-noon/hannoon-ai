@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PeriodicConsolidationRelationsV7",
+  "type": "object",
+  "required": [
+    "duplicate_pairs",
+    "contained_by"
+  ],
+  "properties": {
+    "duplicate_pairs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "left_subtopic_id": {
+            "type": "string"
+          },
+          "right_subtopic_id": {
+            "type": "string"
+          },
+          "mutual_membership_equivalent": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "contained_by": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "child_subtopic_id": {
+            "type": "string"
+          },
+          "container_subtopic_id": {
+            "type": "string"
+          },
+          "same_process_instance": {
+            "type": "boolean"
+          },
+          "child_scope_subset": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

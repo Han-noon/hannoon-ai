@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EventProfile",
+  "type": "object",
+  "required": [
+    "event_id",
+    "event_name",
+    "representative_published_date",
+    "first_published_at",
+    "event_summary",
+    "anchors"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string"
+    },
+    "event_name": {
+      "type": "string"
+    },
+    "first_published_at": {
+      "type": "string",
+      "description": "해당 Event에 속한 기사 중 가장 빠른 published_at. 실제 사건 발생시각이 아님."
+    },
+    "event_summary": {
+      "type": "string",
+      "description": "Event에 속한 기사 전체를 근거로 작성한 2~4문장 요약."
+    },
+    "anchors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "type",
+          "evidence_role"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "ENTITY",
+              "ISSUE",
+              "PROCESS",
+              "POLICY_OR_SYSTEM"
+            ]
+          },
+          "evidence_role": {
+            "type": "string",
+            "description": "이 anchor가 이 Event에서 중심 기준점인 이유를 한 문장으로 설명."
+          }
+        }
+      }
+    },
+    "representative_published_date": {
+      "type": "string",
+      "description": "Event 귀속 기사 게시 날짜 최빈값(동률이면 이른 날짜), Asia/Seoul 기준."
+    }
+  },
+  "additionalProperties": false
+}

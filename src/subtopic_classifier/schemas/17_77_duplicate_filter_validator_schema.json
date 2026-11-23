@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DuplicateFilterValidatorV7",
+  "type": "object",
+  "required": [
+    "decisions"
+  ],
+  "properties": {
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "pair_id",
+          "left_accepts_right",
+          "right_accepts_left",
+          "decision"
+        ],
+        "properties": {
+          "pair_id": {
+            "type": "string"
+          },
+          "left_accepts_right": {
+            "type": "boolean"
+          },
+          "right_accepts_left": {
+            "type": "boolean"
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "SAME_FILTER",
+              "DISTINCT_FILTER"
+            ]
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

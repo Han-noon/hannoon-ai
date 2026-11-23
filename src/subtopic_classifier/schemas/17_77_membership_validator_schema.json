@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SubtopicMembershipValidatorV7",
+  "type": "object",
+  "required": [
+    "event_id",
+    "relation",
+    "related_path",
+    "evidence_scope",
+    "source",
+    "anchor_name",
+    "summary_sentence_index",
+    "reason"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string"
+    },
+    "relation": {
+      "type": "string",
+      "enum": [
+        "DIRECT",
+        "RELATED",
+        "INDIRECT",
+        "NONE"
+      ]
+    },
+    "related_path": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "SAME_CONCRETE_MECHANISM",
+        "EXPLICIT_DIRECT_RELATION",
+        null
+      ]
+    },
+    "evidence_scope": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "PRIMARY",
+        "DIRECT_CONTEXT",
+        "BACKGROUND_ONLY",
+        null
+      ]
+    },
+    "source": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "EVENT_NAME",
+        "ANCHOR",
+        "EVENT_SUMMARY",
+        null
+      ]
+    },
+    "anchor_name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "summary_sentence_index": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "additionalProperties": false
+}
