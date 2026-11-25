@@ -168,8 +168,9 @@ def prepare_event(
     article_set_hash = hashlib.md5(article_ids, usedforsecurity=False).hexdigest()
     input_hash = f"v2:{article_set_hash}:{content_hash}"
     span_days = (last - first).total_seconds() / 86400.0
-    numeric_id: int | str = event.id
-    order_key = (representative_date, _iso(first), numeric_id)
+    # The reviewed 17_78 file pipeline sorted JSONL event_id values as strings.
+    # Keep that exact final tie-breaker even though the DB key is numeric.
+    order_key = (representative_date, _iso(first), str(event.id))
     return PreparedEvent(
         event=event,
         profile_input=profile_input,
@@ -181,10 +182,14 @@ def prepare_event(
 
 
 def from_cached_profile(prepared: PreparedEvent, row: dict[str, Any]) -> ProfileResult | None:
-    if row.get("input_hash") != prepared.input_hash:
-        return None
-    if row.get("prompt_version") != prepared.prompt_version:
-        return None
+    """Adopt any structurally valid Profile already stored for this event_id.
+
+    ``input_hash`` and ``prompt_version`` were introduced after Profiles had
+    already been loaded manually.  They are therefore informational metadata,
+    not cache validity requirements.  Historical Profile refresh is an explicit
+    replay/profile-maintenance concern, never an automatic batch side effect.
+    """
+
     event_summary = str(row.get("event_summary") or "").strip()
     anchors = row.get("anchors")
     if not event_summary or not isinstance(anchors, list):

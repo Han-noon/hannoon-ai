@@ -58,9 +58,14 @@ _REQUIRED_COLUMNS: dict[str, set[str]] = {
 }
 
 
-def validate_schema(conn) -> None:
+def validate_schema(conn, *, require_state: bool = True) -> None:
     """Fail early if the externally managed Postgres schema is incomplete."""
 
+    required_columns = dict(_REQUIRED_COLUMNS)
+    if require_state:
+        required_columns["subtopic_classifier_states"] = {
+            "topic_id", "state_version", "core_state", "runtime_profiles", "updated_at",
+        }
     rows = conn.query(
         """
         SELECT table_name, column_name
@@ -68,16 +73,16 @@ def validate_schema(conn) -> None:
         WHERE table_schema = 'public'
           AND table_name = ANY(?::text[])
         """,
-        (list(_REQUIRED_COLUMNS),),
+        (list(required_columns),),
     )
-    actual: dict[str, set[str]] = {table: set() for table in _REQUIRED_COLUMNS}
+    actual: dict[str, set[str]] = {table: set() for table in required_columns}
     for row in rows:
         actual.setdefault(row["table_name"], set()).add(row["column_name"])
 
     missing_tables = [table for table, columns in actual.items() if not columns]
     missing_columns = {
         table: sorted(required - actual.get(table, set()))
-        for table, required in _REQUIRED_COLUMNS.items()
+        for table, required in required_columns.items()
         if required - actual.get(table, set())
     }
     if not missing_tables and not missing_columns:
@@ -120,7 +125,7 @@ def _event_scope_sql(
     return conditions, params
 
 
-def fetch_bootstrap_events(
+def fetch_profile_events(
     conn,
     *,
     topic_id: int | None = None,
@@ -144,52 +149,19 @@ def fetch_bootstrap_events(
 def fetch_pending_events(
     conn,
     *,
-    prompt_version: str,
     topic_id: int | None = None,
     event_id: int | None = None,
-    force: bool = False,
     limit: int | None = None,
 ) -> list[EventRow]:
-    """Return Events whose exact Subtopic input may need re-evaluation.
+    """Return only Events that have never completed Subtopic classification.
 
-    The article-id digest is the middle component of the ``v2:<md5>:<sha256>``
-    input hash built by ``prepare_event``.  Comparing it in SQL catches links
-    added to or removed from ``event_articles``, which has no updated timestamp.
-    The service performs the final full hash comparison after loading the rows.
+    Changes to already processed Events are deliberately outside the normal
+    incremental batch policy.  They may be handled only by an explicit Topic
+    replay so article additions cannot silently reclassify historical data.
     """
 
     conditions, params = _event_scope_sql(topic_id=topic_id, event_id=event_id)
-    if not force:
-        conditions.append(
-            """
-            (
-                e.subtopic_processed_at IS NULL
-                OR ep.event_id IS NULL
-                OR ep.prompt_version IS DISTINCT FROM ?
-                OR e.updated_at > e.subtopic_processed_at
-                OR EXISTS (
-                    SELECT 1
-                    FROM event_articles changed_ea
-                    JOIN articles changed_a ON changed_a.id = changed_ea.article_id
-                    WHERE changed_ea.event_id = e.id
-                      AND changed_a.updated_at > e.subtopic_processed_at
-                )
-                OR split_part(COALESCE(ep.input_hash, ''), ':', 2)
-                   IS DISTINCT FROM COALESCE(
-                       (
-                           SELECT md5(string_agg(linked.article_id::text, ',' ORDER BY linked.article_id))
-                           FROM (
-                               SELECT DISTINCT ea.article_id
-                               FROM event_articles ea
-                               WHERE ea.event_id = e.id
-                           ) linked
-                       ),
-                       md5('')
-                   )
-            )
-            """
-        )
-        params.append(prompt_version)
+    conditions.append("e.subtopic_processed_at IS NULL")
 
     limit_sql = ""
     if limit is not None:
@@ -204,7 +176,6 @@ def fetch_pending_events(
                e.created_at, e.updated_at, e.subtopic_processed_at
         FROM events e
         JOIN topics t ON t.id = e.topic_id
-        LEFT JOIN event_profiles ep ON ep.event_id = e.id
         WHERE {' AND '.join(conditions)}
         ORDER BY e.created_at ASC, e.id ASC
         {limit_sql}
@@ -307,49 +278,6 @@ def upsert_event_profile(conn, profile: ProfileResult) -> None:
             profile.prompt_version,
         ),
     )
-
-
-def adopt_event_profile_metadata(
-    conn,
-    *,
-    event_id: int,
-    input_hash: str,
-    prompt_version: str,
-) -> None:
-    conn.execute(
-        """
-        UPDATE event_profiles
-        SET input_hash = ?, prompt_version = ?, updated_at = now()
-        WHERE event_id = ?
-        """,
-        (input_hash, prompt_version, event_id),
-    )
-
-
-def count_unbootstrapped_profiles(conn, *, topic_id: int | None = None) -> int:
-    conditions = ["e.topic_id IS NOT NULL", "(ep.input_hash IS NULL OR ep.prompt_version IS NULL)"]
-    params: list[Any] = []
-    if topic_id is not None:
-        conditions.append("e.topic_id = ?")
-        params.append(topic_id)
-    row = conn.query_one(
-        f"""
-        SELECT count(*) AS count
-        FROM event_profiles ep
-        JOIN events e ON e.id = ep.event_id
-        WHERE {' AND '.join(conditions)}
-        """,
-        params,
-    )
-    return int(row["count"]) if row else 0
-
-
-def event_membership_count(conn, event_id: int) -> int:
-    row = conn.query_one(
-        "SELECT count(*) AS count FROM subtopic_events WHERE event_id = ?",
-        (event_id,),
-    )
-    return int(row["count"]) if row else 0
 
 
 def fetch_topic_subtopics(conn, topic_id: int) -> list[dict[str, Any]]:
@@ -585,6 +513,19 @@ def mark_events_processed(conn, event_ids: Iterable[int]) -> None:
     )
 
 
+def clear_events_processed(conn, event_ids: Iterable[int]) -> None:
+    """Clear completion only for explicitly supplied, filtered Events."""
+
+    ids = sorted({int(value) for value in event_ids})
+    if not ids:
+        return
+    placeholders = ", ".join("?" for _ in ids)
+    conn.execute(
+        f"UPDATE events SET subtopic_processed_at = NULL WHERE id IN ({placeholders})",
+        ids,
+    )
+
+
 def try_topic_advisory_lock(conn, topic_id: int) -> bool:
     row = conn.query_one(
         "SELECT pg_try_advisory_lock(hashtextextended('hannoon-subtopic:' || ?::text, 0)) AS locked",
@@ -597,4 +538,35 @@ def release_topic_advisory_lock(conn, topic_id: int) -> None:
     conn.query_one(
         "SELECT pg_advisory_unlock(hashtextextended('hannoon-subtopic:' || ?::text, 0)) AS unlocked",
         (topic_id,),
+    )
+
+
+STATE_VERSION = 1
+
+
+def fetch_classifier_state(conn, topic_id: int) -> dict[str, Any] | None:
+    return conn.query_one(
+        """
+        SELECT state_version, core_state, runtime_profiles
+        FROM public.subtopic_classifier_states WHERE topic_id = ?
+        """,
+        (topic_id,),
+    )
+
+
+def save_classifier_state(conn, topic_id: int, state: dict[str, Any], profiles: list[dict[str, Any]]) -> None:
+    """Caller must own the same transaction as memberships and completion markers."""
+    conn.execute(
+        """
+        INSERT INTO public.subtopic_classifier_states
+            (topic_id, state_version, core_state, runtime_profiles)
+        VALUES (?, ?, ?::jsonb, ?::jsonb)
+        ON CONFLICT (topic_id) DO UPDATE SET
+            state_version = EXCLUDED.state_version,
+            core_state = EXCLUDED.core_state,
+            runtime_profiles = EXCLUDED.runtime_profiles,
+            updated_at = now()
+        """,
+        (topic_id, STATE_VERSION, json.dumps(state, ensure_ascii=False, allow_nan=False),
+         json.dumps(profiles, ensure_ascii=False, allow_nan=False)),
     )

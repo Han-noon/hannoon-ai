@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 MAX_ARTICLE_SPAN_DAYS = 30.0
+MIN_TOPIC_EVENTS = 7
 DEFAULT_PROFILE_MODEL = "@preset/hannoon"
 DEFAULT_SUBTOPIC_MODEL = "@preset/hannoon-subtopic"
 DEFAULT_SUMMARY_MODEL = DEFAULT_SUBTOPIC_MODEL

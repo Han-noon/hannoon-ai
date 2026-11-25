@@ -11,8 +11,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from collector.settings import DEFAULT_DB
-from collector.storage import ensure_db
+from collector.storage import PostgresConnection
 
 from .service import SubtopicBatchService
 
@@ -32,17 +31,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile-model")
     parser.add_argument("--subtopic-model")
     parser.add_argument("--summary-model")
-    parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--replay-topic",
+        action="store_true",
+        help="Explicitly replay every Event in --topic-id; never enabled automatically",
+    )
+    parser.add_argument(
+        "--profiles-only",
+        action="store_true",
+        help="Generate/reuse Event Profiles without classification or processed markers",
+    )
+    parser.add_argument("--import-checkpoint", type=Path,
+        help="Validate/adopt an explicitly reconciled checkpoint JSON for --topic-id; no AI calls")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--json-mode",
         action="store_true",
         help="Request JSON response mode from Profile/Subtopic model providers",
-    )
-    parser.add_argument(
-        "--bootstrap-existing",
-        action="store_true",
-        help="Adopt existing Profiles/Subtopics without replaying the classifier",
     )
     parser.add_argument(
         "--log-level",
@@ -63,8 +68,17 @@ def main() -> int:
     _positive(parser, "--topic-id", args.topic_id)
     _positive(parser, "--event-id", args.event_id)
     _positive(parser, "--limit", args.limit)
-    if args.bootstrap_existing and (args.force or args.limit is not None):
-        parser.error("--bootstrap-existing cannot be combined with --force or --limit")
+    if args.replay_topic and (
+        args.topic_id is None or args.event_id is not None or args.limit is not None
+    ):
+        parser.error("--replay-topic requires --topic-id and cannot use --event-id/--limit")
+    if args.replay_topic and args.profiles_only:
+        parser.error("--replay-topic and --profiles-only cannot be combined")
+    if args.import_checkpoint is not None and (
+        args.topic_id is None or args.event_id is not None or args.limit is not None
+        or args.replay_topic or args.profiles_only
+    ):
+        parser.error("--import-checkpoint requires --topic-id and cannot be combined with other modes")
     if not args.env_file.is_file():
         parser.error(f"environment file not found: {args.env_file}")
 
@@ -79,7 +93,11 @@ def main() -> int:
     )
 
     try:
-        with ensure_db(DEFAULT_DB, database_url=database_url) as conn:
+        import psycopg
+        from psycopg.rows import dict_row
+
+        # Subtopic-only path: validate only its own schema (no collector jobs/feeds).
+        with PostgresConnection(psycopg.connect(database_url, row_factory=dict_row, autocommit=True)) as conn:
             service = SubtopicBatchService(
                 conn,
                 env_file=args.env_file,
@@ -89,17 +107,21 @@ def main() -> int:
                 json_mode=args.json_mode,
                 dry_run=args.dry_run,
             )
-            if args.bootstrap_existing:
-                result = service.bootstrap_existing(
+            if args.import_checkpoint is not None:
+                checkpoint = json.loads(args.import_checkpoint.read_text(encoding="utf-8-sig"))
+                result = service.import_checkpoint(args.topic_id, checkpoint)
+            elif args.profiles_only:
+                result = service.generate_profiles_only(
                     topic_id=args.topic_id,
                     event_id=args.event_id,
+                    limit=args.limit,
                 )
             else:
                 result = service.run(
                     topic_id=args.topic_id,
                     event_id=args.event_id,
                     limit=args.limit,
-                    force=args.force,
+                    replay_topic=args.replay_topic,
                 )
     except Exception as exc:
         logging.getLogger(__name__).exception("Subtopic batch failed")
@@ -107,7 +129,7 @@ def main() -> int:
         return 1
 
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
-    return 0
+    return 1 if result.get("failures") or result.get("summary_failures") else 0
 
 
 if __name__ == "__main__":

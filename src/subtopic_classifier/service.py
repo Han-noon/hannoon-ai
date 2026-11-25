@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ from db import subtopics as repo
 from .engine import ValidatedSubtopicEngine, initial_state
 from .models import EventRow, PreparedEvent, ProfileResult
 from .profile import from_cached_profile, generate_profile, prepare_event, profile_prompt_version
-from .settings import MAX_ARTICLE_SPAN_DAYS
+from .settings import MAX_ARTICLE_SPAN_DAYS, MIN_TOPIC_EVENTS
 from .summary import SubtopicSummaryGenerator
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,14 @@ class EventProcessingError(RuntimeError):
     def __init__(self, event_id: int, message: str) -> None:
         super().__init__(f"event_id={event_id}: {message}")
         self.event_id = event_id
+
+
+class ClassifierStateUnavailableError(RuntimeError):
+    """Exact 17_78 stream state cannot be reconstructed from public tables."""
+
+
+class ProcessedProfileMissingError(RuntimeError):
+    """A completed Event has no valid Profile and needs explicit recovery."""
 
 
 class SubtopicBatchService:
@@ -54,150 +63,26 @@ class SubtopicBatchService:
             json_mode=json_mode,
         )
 
-    def bootstrap_existing(
-        self,
-        *,
-        topic_id: int | None = None,
-        event_id: int | None = None,
-    ) -> dict[str, Any]:
-        """Adopt the current DB snapshot without any LLM/Subtopic replay.
-
-        This is the one-time bridge from the reviewed 17_78 file snapshot to
-        the DB-backed runner.  Existing Profile content and Subtopic tables are
-        never changed.  Cache metadata is backfilled for rows that already have
-        a Profile, while current profile-less baseline Events are marked as
-        processed exclusions only when they have no Subtopic membership.
-        """
-
-        repo.validate_schema(self.conn)
-        events = repo.fetch_bootstrap_events(
-            self.conn,
-            topic_id=topic_id,
-            event_id=event_id,
-        )
-        grouped: dict[int, list[EventRow]] = defaultdict(list)
-        for event in events:
-            grouped[event.topic_id].append(event)
-
-        result: dict[str, Any] = {
-            "bootstrap": True,
-            "dry_run": self.dry_run,
-            "scanned_event_count": len(events),
-            "profile_metadata_updated_count": 0,
-            "profileless_baseline_excluded_count": 0,
-            "processed_marker_added_count": 0,
-            "skipped_locked_topic_count": 0,
-            "failures": [],
-        }
-
-        for current_topic_id in sorted(grouped):
-            if not repo.try_topic_advisory_lock(self.conn, current_topic_id):
-                result["skipped_locked_topic_count"] += 1
-                continue
-            try:
-                for event in grouped[current_topic_id]:
-                    try:
-                        cached = repo.fetch_event_profile(self.conn, event.id)
-                        if cached is None:
-                            memberships = repo.event_membership_count(self.conn, event.id)
-                            if memberships:
-                                raise RuntimeError(
-                                    "Profile이 없는데 기존 subtopic_events membership이 있습니다. "
-                                    "자동 bootstrap에서 제외합니다."
-                                )
-                            prepared = self._prepare(event)
-                            if not self.dry_run and event.subtopic_processed_at is None:
-                                with self.conn.transaction():
-                                    repo.lock_event(self.conn, event.id)
-                                    self._assert_source_unchanged(prepared)
-                                    repo.mark_events_processed(self.conn, [event.id])
-                            if event.subtopic_processed_at is None:
-                                result["processed_marker_added_count"] += 1
-                            result["profileless_baseline_excluded_count"] += 1
-                            continue
-
-                        prepared = self._prepare(event)
-                        event_summary = str(cached.get("event_summary") or "").strip()
-                        anchors = cached.get("anchors")
-                        if not event_summary or not isinstance(anchors, list):
-                            raise RuntimeError("기존 event_profiles의 event_summary/anchors가 유효하지 않습니다.")
-
-                        metadata_changed = (
-                            cached.get("input_hash") != prepared.input_hash
-                            or cached.get("prompt_version") != prepared.prompt_version
-                        )
-                        if not self.dry_run and (metadata_changed or event.subtopic_processed_at is None):
-                            with self.conn.transaction():
-                                repo.lock_event(self.conn, event.id)
-                                self._assert_source_unchanged(prepared)
-                                if metadata_changed:
-                                    repo.adopt_event_profile_metadata(
-                                        self.conn,
-                                        event_id=event.id,
-                                        input_hash=prepared.input_hash,
-                                        prompt_version=prepared.prompt_version,
-                                    )
-                                if event.subtopic_processed_at is None:
-                                    repo.mark_events_processed(self.conn, [event.id])
-                        if metadata_changed:
-                            result["profile_metadata_updated_count"] += 1
-                        if event.subtopic_processed_at is None:
-                            result["processed_marker_added_count"] += 1
-                    except Exception as exc:
-                        result["failures"].append(
-                            {
-                                "topic_id": current_topic_id,
-                                "event_id": event.id,
-                                "error_type": type(exc).__name__,
-                                "error": str(exc),
-                            }
-                        )
-            finally:
-                repo.release_topic_advisory_lock(self.conn, current_topic_id)
-
-        if not self.dry_run:
-            remaining = repo.fetch_pending_events(
-                self.conn,
-                prompt_version=self.profile_version,
-                topic_id=topic_id,
-                event_id=event_id,
-                force=False,
-            )
-            result["remaining_pending_count"] = len(remaining)
-        else:
-            result["remaining_pending_count"] = None
-        return result
-
     def run(
         self,
         *,
         topic_id: int | None = None,
         event_id: int | None = None,
         limit: int | None = None,
-        force: bool = False,
+        replay_topic: bool = False,
     ) -> dict[str, Any]:
         repo.validate_schema(self.conn)
-        scope_topic_id = topic_id
-        if scope_topic_id is None and event_id is not None:
-            scoped_event = repo.fetch_event(self.conn, event_id)
-            scope_topic_id = scoped_event.topic_id if scoped_event else None
-        runtime_profile_count = repo.count_unbootstrapped_profiles(
-            self.conn,
-            topic_id=scope_topic_id,
-        )
-        if runtime_profile_count:
-            raise RuntimeError(
-                f"기존 event_profiles {runtime_profile_count}건에 input_hash/prompt_version이 없습니다. "
-                "일반 batch 전에 --bootstrap-existing을 먼저 실행하세요."
+        if replay_topic:
+            if topic_id is None or event_id is not None or limit is not None:
+                raise ValueError("replay_topic requires topic_id and cannot use event_id/limit")
+            selected = repo.fetch_topic_events(self.conn, topic_id)
+        else:
+            selected = repo.fetch_pending_events(
+                self.conn,
+                topic_id=topic_id,
+                event_id=event_id,
+                limit=limit,
             )
-        selected = repo.fetch_pending_events(
-            self.conn,
-            prompt_version=self.profile_version,
-            topic_id=topic_id,
-            event_id=event_id,
-            force=force,
-            limit=limit,
-        )
         grouped: dict[int, list[EventRow]] = defaultdict(list)
         for event in selected:
             grouped[event.topic_id].append(event)
@@ -207,6 +92,8 @@ class SubtopicBatchService:
             "processed_event_count": 0,
             "excluded_event_count": 0,
             "rebuilt_topic_count": 0,
+            "skipped_below_threshold_topic_count": 0,
+            "skipped_below_threshold_event_count": 0,
             "skipped_locked_topic_count": 0,
             "summary_updated_count": 0,
             "summary_failures": [],
@@ -240,7 +127,7 @@ class SubtopicBatchService:
                     self._run_topic(
                         current_topic_id,
                         selected=grouped[current_topic_id],
-                        force=force,
+                        replay_topic=replay_topic,
                         result=result,
                     )
                 self._refresh_topic_summaries(current_topic_id, result)
@@ -262,32 +149,121 @@ class SubtopicBatchService:
                 repo.release_topic_advisory_lock(self.conn, current_topic_id)
         return result
 
+    def import_checkpoint(self, topic_id: int, checkpoint: dict[str, Any]) -> dict[str, Any]:
+        """Adopt an explicitly reconciled checkpoint without AI calls or public-data edits.
+
+        The supplied IDs and active Subtopic data must already match the DB.
+        Raw historical exports with local Event IDs or manual edits are not accepted.
+        """
+        repo.validate_schema(self.conn)
+        if not repo.try_topic_advisory_lock(self.conn, topic_id):
+            raise RuntimeError(f"topic_id={topic_id}: Topic is locked")
+        try:
+            with self.conn.transaction():
+                repo.lock_topic(self.conn, topic_id)
+                if repo.fetch_classifier_state(self.conn, topic_id) is not None:
+                    raise ClassifierStateUnavailableError("기존 checkpoint는 import로 덮어쓸 수 없습니다")
+                events = repo.fetch_topic_events(self.conn, topic_id)
+                if not events:
+                    raise ClassifierStateUnavailableError("Topic에 Event가 없습니다")
+                completed = {str(e.id) for e in events if e.subtopic_processed_at is not None}
+                state, context = self._validate_checkpoint(topic_id, checkpoint, completed,
+                    repo.fetch_topic_subtopics(self.conn, topic_id))
+                state["topic_name"] = events[0].topic_name
+                if not self.dry_run:
+                    repo.save_classifier_state(self.conn, topic_id, state, context)
+            return {"topic_id": topic_id, "processed_event_count": len(completed),
+                    "active_subtopic_count": len(state["subtopics"]), "dry_run": self.dry_run}
+        finally:
+            repo.release_topic_advisory_lock(self.conn, topic_id)
+
+    def generate_profiles_only(
+        self,
+        *,
+        topic_id: int | None = None,
+        event_id: int | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Create missing/invalid Profiles without classifying or marking Events.
+
+        This maintenance mode intentionally does not enforce the seven-Event
+        Topic threshold.  A valid Profile already stored for an event_id is
+        reused regardless of nullable cache metadata.
+        """
+
+        repo.validate_schema(self.conn, require_state=False)
+        events = repo.fetch_profile_events(
+            self.conn,
+            topic_id=topic_id,
+            event_id=event_id,
+        )
+        if limit is not None:
+            events = events[:limit]
+        result: dict[str, Any] = {
+            "profiles_only": True,
+            "selected_event_count": len(events),
+            "generated_profile_count": 0,
+            "reused_profile_count": 0,
+            "failures": [],
+            "dry_run": self.dry_run,
+        }
+        for event in events:
+            locked = repo.try_topic_advisory_lock(self.conn, event.topic_id)
+            if not locked:
+                result["failures"].append({"topic_id": event.topic_id, "event_id": event.id,
+                    "error_type": "TopicLocked", "error": "Topic is being classified; retry later"})
+                continue
+            try:
+                current = repo.fetch_event(self.conn, event.id)
+                if current is None or current.topic_id != event.topic_id:
+                    raise SourceChangedError("Event Topic changed; retry later")
+                prepared = self._prepare(current)
+                profile = self._profile(prepared)
+                key = "reused_profile_count" if profile.reused else "generated_profile_count"
+                result[key] += 1
+            except Exception as exc:
+                result["failures"].append(
+                    {
+                        "topic_id": event.topic_id,
+                        "event_id": event.id,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    }
+                )
+            finally:
+                repo.release_topic_advisory_lock(self.conn, event.topic_id)
+        return result
+
     def _run_topic(
         self,
         topic_id: int,
         *,
         selected: list[EventRow],
-        force: bool,
+        replay_topic: bool,
         result: dict[str, Any],
     ) -> None:
-        selected_ids = {event.id for event in selected}
-        refreshed = repo.fetch_pending_events(
-            self.conn,
-            prompt_version=self.profile_version,
-            topic_id=topic_id,
-            force=force,
-        )
-        if force:
-            pending = [event for event in refreshed if event.id in selected_ids]
-        else:
-            # A targeted/limited invocation may select a later Event. Include all
-            # older pending Events so the target cannot skip unseen past state.
-            prepared_refreshed = [self._prepare(event) for event in refreshed]
-            selected_prepared = [item for item in prepared_refreshed if item.event.id in selected_ids]
-            if not selected_prepared:
-                return
-            cutoff = max(item.order_key for item in selected_prepared)
-            pending = [item.event for item in prepared_refreshed if item.order_key <= cutoff]
+        all_topic_events = repo.fetch_topic_events(self.conn, topic_id)
+        if len(all_topic_events) < MIN_TOPIC_EVENTS:
+            result["skipped_below_threshold_topic_count"] += 1
+            result["skipped_below_threshold_event_count"] += len(selected)
+            return
+
+        if replay_topic:
+            processed, excluded = self._rebuild_topic(
+                topic_id,
+                all_topic_events[0].topic_name,
+                initial_state(all_topic_events[0].topic_name),
+            )
+            result["processed_event_count"] += processed
+            result["excluded_event_count"] += excluded
+            result["rebuilt_topic_count"] += 1
+            return
+
+        # Once an eligible Topic is selected, consume all of its unprocessed
+        # Events in chronological order.  A global --limit may choose which
+        # Topics enter this run, but must not leave an exact in-memory stream
+        # state half-finished.
+        pending = repo.fetch_pending_events(self.conn, topic_id=topic_id)
         if not pending:
             return
 
@@ -295,38 +271,10 @@ class SubtopicBatchService:
         prepared_pending = [self._prepare(event) for event in pending]
         prepared_pending.sort(key=lambda item: item.order_key)
 
-        # events.updated_at can change for fields irrelevant to Subtopic input.
-        # If the exact content-derived Profile input is unchanged, only advance
-        # the completion marker instead of replaying the Topic.
-        effective_pending: list[PreparedEvent] = []
-        for prepared in prepared_pending:
-            cached = repo.fetch_event_profile(self.conn, prepared.event.id)
-            unchanged = from_cached_profile(prepared, cached) if cached else None
-            if not force and prepared.event.subtopic_processed_at is not None and unchanged:
-                self._ack_unchanged_event(prepared)
-                result["processed_event_count"] += 1
-            else:
-                effective_pending.append(prepared)
-        prepared_pending = effective_pending
-        if not prepared_pending:
-            return
-
-        if force or self._requires_replay(state, prepared_pending):
-            processed, excluded = self._rebuild_topic(topic_id, pending[0].topic_name, state)
-            result["processed_event_count"] += processed
-            result["excluded_event_count"] += excluded
-            result["rebuilt_topic_count"] += 1
-            return
-
         for prepared in prepared_pending:
             try:
                 profile = self._profile(prepared)
                 if prepared.article_span_days > MAX_ARTICLE_SPAN_DAYS:
-                    excluded = state.setdefault("excluded_event_ids", [])
-                    if str(prepared.event.id) not in excluded:
-                        excluded.append(str(prepared.event.id))
-                    self._persist_one(prepared, profile, state, remove_memberships=True)
-                    result["processed_event_count"] += 1
                     result["excluded_event_count"] += 1
                     continue
 
@@ -339,7 +287,7 @@ class SubtopicBatchService:
                     current_event_id=prepared.event.id,
                 )
                 new_state["last_processed_order_key"] = list(prepared.order_key)
-                self._persist_one(prepared, profile, new_state)
+                self._persist_one(prepared, new_state, next_context, previous_state=state)
                 state = new_state
                 context = next_context
                 result["processed_event_count"] += 1
@@ -360,44 +308,24 @@ class SubtopicBatchService:
                 raise
             raise EventProcessingError(event.id, str(exc)) from exc
 
-    def _ack_unchanged_event(self, prepared: PreparedEvent) -> None:
-        if self.dry_run:
-            logger.info("[dry-run] event_id=%s unchanged marker write skipped", prepared.event.id)
-            return
-        with self.conn.transaction():
-            repo.lock_event(self.conn, prepared.event.id)
-            self._assert_source_unchanged(prepared)
-            repo.mark_events_processed(self.conn, [prepared.event.id])
-
     @staticmethod
     def _profile_order_key(item: dict[str, Any]) -> tuple[Any, ...]:
-        raw_id = str(item["event_id"])
-        event_id: int | str = int(raw_id) if raw_id.isdigit() else raw_id
         return (
             item["representative_published_date"],
             item["first_published_at"],
-            event_id,
+            str(item["event_id"]),
         )
 
-    @staticmethod
-    def _requires_replay(state: dict[str, Any], pending: list[PreparedEvent]) -> bool:
-        if state.get("stale_processed_event_ids"):
-            return True
-        if any(item.event.subtopic_processed_at is not None for item in pending):
-            return True
-        processed_ids = {str(value) for value in state.get("processed_event_ids", [])}
-        if any(str(item.event.id) in processed_ids for item in pending):
-            return True
-        last_key = state.get("last_processed_order_key")
-        return last_key is not None and any(
-            tuple(item.order_key) <= tuple(last_key) for item in pending
-        )
-
-    def _profile(self, prepared: PreparedEvent) -> ProfileResult:
+    def _profile(self, prepared: PreparedEvent, *, allow_processed_repair: bool = False) -> ProfileResult:
         cached = repo.fetch_event_profile(self.conn, prepared.event.id)
         reusable = from_cached_profile(prepared, cached) if cached else None
         if reusable:
             return reusable
+        if prepared.event.subtopic_processed_at is not None and not allow_processed_repair:
+            raise ProcessedProfileMissingError(
+                f"event_id={prepared.event.id}: 처리 완료 Profile이 없거나 유효하지 않습니다. "
+                "일반 Profile 생성으로 checkpoint를 변경할 수 없습니다. 명시적 replay 또는 이관이 필요합니다."
+            )
         generated = generate_profile(
             prepared,
             env_file=self.env_file,
@@ -406,7 +334,7 @@ class SubtopicBatchService:
         )
         # Profile is a cache, not a completion marker. A later Subtopic failure
         # can reuse this successful call, but processed_at remains unchanged.
-        if not self.dry_run:
+        if not self.dry_run and not allow_processed_repair:
             with self.conn.transaction():
                 repo.lock_event(self.conn, prepared.event.id)
                 self._assert_source_unchanged(prepared)
@@ -422,80 +350,94 @@ class SubtopicBatchService:
         topic_id: int,
         topic_name: str,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        """Rebuild classifier state from the existing DB tables only."""
-
-        state = initial_state(topic_name)
-        state["stale_processed_event_ids"] = []
-        eligible: list[tuple[PreparedEvent, ProfileResult]] = []
-        for event in repo.fetch_topic_events(self.conn, topic_id):
-            if event.subtopic_processed_at is None:
-                continue
-            cached = repo.fetch_event_profile(self.conn, event.id)
-            # Bootstrap may intentionally adopt a historical Profile failure as
-            # a processed baseline exclusion.  Such rows have no Profile and
-            # must not force a full replay on the next new Event.
-            if cached is None:
-                state["excluded_event_ids"].append(str(event.id))
-                continue
-            prepared = self._prepare(event)
-            if prepared.article_span_days > MAX_ARTICLE_SPAN_DAYS:
-                state["excluded_event_ids"].append(str(event.id))
-                continue
-            profile = from_cached_profile(prepared, cached) if cached else None
-            if profile is None:
-                state["stale_processed_event_ids"].append(str(event.id))
-                continue
-            eligible.append((prepared, profile))
-
-        eligible.sort(key=lambda pair: pair[0].order_key)
-        eligible_ids = {str(item.event.id) for item, _ in eligible}
-        state["processed_event_ids"] = [str(item.event.id) for item, _ in eligible]
-        state["last_processed_step"] = len(eligible)
-        if eligible:
-            last = eligible[-1][0]
-            state["last_processed_event_id"] = str(last.event.id)
-            state["last_processed_order_key"] = list(last.order_key)
-
-        mapping: dict[str, int] = {}
-        max_number = 0
-        for row in repo.fetch_topic_subtopics(self.conn, topic_id):
-            db_id = int(row["id"])
-            sid = f"ST{db_id:03d}"
-            max_number = max(max_number, db_id)
-            mapping[sid] = db_id
-            state["subtopics"].append(
-                {
-                    "subtopic_id": sid,
-                    "name": row["name"],
-                    "display_name_status": "OK",
-                    "type": row["type"],
-                    "common_basis": row["common_basis"],
-                    "membership_criterion": row["membership_criterion"],
-                    "event_ids": [
-                        str(value) for value in row["event_ids"] if str(value) in eligible_ids
-                    ],
-                    "creation_membership_validations": [],
-                    "created_at_step": 0,
-                    "created_by_event_id": None,
-                    "candidate_reason": "reconstructed from DB",
-                    "creation_scope_refinement": None,
-                    "refinement_history": [],
-                    "update_history": [],
-                }
-            )
-        state["db_subtopic_ids"] = mapping
-        state["next_subtopic_number"] = max_number + 1
-
-        # No extra state table is introduced. Reconstruct the regular 7+10n
-        # checkpoint; within this run the validated core carries exact state.
-        step = len(eligible)
-        if state["subtopics"] and step >= 7:
-            state["last_consolidated_step"] = 7 + ((step - 7) // 10) * 10
-            state["consolidation_count"] = max(0, (step - 7) // 10)
-
-        context = [profile.runtime_profile for _, profile in eligible]
-        context.sort(key=self._profile_order_key)
+        """Restore the last committed checkpoint, never infer historical steps."""
+        saved = repo.fetch_classifier_state(self.conn, topic_id)
+        events = repo.fetch_topic_events(self.conn, topic_id)
+        completed = {str(event.id) for event in events if event.subtopic_processed_at is not None}
+        rows = repo.fetch_topic_subtopics(self.conn, topic_id)
+        if saved is None:
+            if completed or rows:
+                raise ClassifierStateUnavailableError(
+                    f"topic_id={topic_id}: 기존 분류 결과에 대응하는 checkpoint가 없습니다. "
+                    "원본 state 검증/이관 또는 명시적 replay가 필요합니다."
+                )
+            return initial_state(topic_name), []
+        state, context = self._validate_checkpoint(topic_id, saved, completed, rows)
+        # A Topic title rename does not change its identity or checkpoint history.
+        state["topic_name"] = topic_name
         return state, context
+
+    def _validate_checkpoint(self, topic_id, saved, completed, rows):
+        """Fail closed if public tables and the checkpoint have drifted."""
+        def fail(message):
+            raise ClassifierStateUnavailableError(f"topic_id={topic_id}: {message}")
+
+        if saved.get("state_version") != repo.STATE_VERSION:
+            fail("지원하지 않는 checkpoint 버전")
+        state = deepcopy(saved.get("core_state"))
+        context = deepcopy(saved.get("runtime_profiles"))
+        if not isinstance(state, dict) or not isinstance(context, list):
+            fail("checkpoint JSON 구조 오류")
+        required = {"topic_name", "processed_event_ids", "subtopics", "next_subtopic_number",
+                    "last_processed_event_id", "last_processed_step", "last_consolidated_step",
+                    "consolidation_count", "retired_subtopics", "db_subtopic_ids"}
+        if not required <= state.keys():
+            fail("필수 state 필드 누락")
+        ids = state["processed_event_ids"]
+        if not isinstance(ids, list) or any(not isinstance(x, str) for x in ids):
+            fail("processed_event_ids 형식 오류")
+        if len(ids) != len(set(ids)) or set(ids) != completed:
+            fail("checkpoint와 DB 처리 완료 Event가 일치하지 않습니다")
+        if (state["last_processed_step"] != len(ids) or
+                state["last_processed_event_id"] != (ids[-1] if ids else None) or
+                not isinstance(state["last_consolidated_step"], int) or
+                not 0 <= state["last_consolidated_step"] <= len(ids) or
+                not isinstance(state["consolidation_count"], int) or state["consolidation_count"] < 0):
+            fail("checkpoint 처리 순서 또는 consolidation 이력 오류")
+        profile_ids = [p.get("event_id") if isinstance(p, dict) else None for p in context]
+        if len(profile_ids) != len(ids) or set(profile_ids) != completed:
+            fail("checkpoint Profile과 완료 Event가 일치하지 않습니다")
+        for profile in context:
+            if not all(k in profile for k in ("event_name", "representative_published_date",
+                                              "first_published_at", "event_summary", "anchors")):
+                fail("checkpoint Profile 필수 정보 누락")
+            cached = repo.fetch_event_profile(self.conn, int(profile["event_id"]))
+            if (not cached or not str(cached.get("event_summary") or "").strip() or
+                    not isinstance(cached.get("anchors"), list)):
+                raise ProcessedProfileMissingError(f"event_id={profile['event_id']}: 유효한 DB Profile 없음")
+            if (str(cached["event_summary"]).strip() != str(profile["event_summary"]).strip() or
+                    cached["anchors"] != profile["anchors"]):
+                fail(f"event_id={profile['event_id']}: DB Profile이 checkpoint와 달라졌습니다")
+        mapping = state["db_subtopic_ids"]
+        if not isinstance(mapping, dict) or not isinstance(state["subtopics"], list):
+            fail("Subtopic 매핑 형식 오류")
+        active = {str(item["subtopic_id"]): item for item in state["subtopics"]}
+        db_rows = {int(row["id"]): row for row in rows}
+        if (len(active) != len(state["subtopics"]) or set(active) != set(mapping) or
+                len(set(mapping.values())) != len(mapping) or set(mapping.values()) != set(db_rows)):
+            fail("checkpoint와 DB 활성 Subtopic ID가 일치하지 않습니다")
+        for sid, item in active.items():
+            row = db_rows[mapping[sid]]
+            if any(item.get(k) != row.get(k) for k in ("name", "type", "common_basis", "membership_criterion")):
+                fail(f"Subtopic {sid}: 분류 기준 또는 이름 불일치")
+            members = [str(x) for x in item.get("event_ids", [])]
+            db_members = [str(x) for x in row.get("event_ids", [])]
+            if (len(members) != len(set(members)) or len(db_members) != len(set(db_members)) or
+                    set(members) != set(db_members) or not set(members) <= completed):
+                fail(f"Subtopic {sid}: membership 불일치")
+        return state, context
+
+    def _check_current_checkpoint(self, topic_id: int, previous_state: dict[str, Any]) -> None:
+        # Recheck under the write transaction before applying the next snapshot.
+        # The batch already holds the per-Topic advisory lock.
+        events = repo.fetch_topic_events(self.conn, topic_id)
+        if not events:
+            raise SourceChangedError(f"topic_id={topic_id} disappeared")
+        current, _ = self._reconstruct_state(topic_id, events[0].topic_name)
+        expected = deepcopy(previous_state)
+        expected["topic_name"] = events[0].topic_name
+        if current != expected:
+            raise SourceChangedError(f"topic_id={topic_id}: checkpoint changed during processing")
 
     def _assert_source_unchanged(self, prepared: PreparedEvent) -> None:
         current_event = repo.fetch_event(self.conn, prepared.event.id)
@@ -515,10 +457,10 @@ class SubtopicBatchService:
     def _persist_one(
         self,
         prepared: PreparedEvent,
-        profile: ProfileResult,
         state: dict[str, Any],
+        context: list[dict[str, Any]],
         *,
-        remove_memberships: bool = False,
+        previous_state: dict[str, Any],
     ) -> None:
         if self.dry_run:
             logger.info("[dry-run] event_id=%s DB writes skipped", prepared.event.id)
@@ -527,11 +469,16 @@ class SubtopicBatchService:
             repo.lock_topic(self.conn, prepared.event.topic_id)
             repo.lock_event(self.conn, prepared.event.id)
             self._assert_source_unchanged(prepared)
-            repo.invalidate_event_subtopic_summaries(self.conn, prepared.event.id)
-            repo.upsert_event_profile(self.conn, profile)
-            repo.remove_event_memberships(self.conn, prepared.event.id)
-            if not remove_memberships:
-                self._sync_public_state(prepared.event.topic_id, state)
+            topic_id = prepared.event.topic_id
+            self._check_current_checkpoint(topic_id, previous_state)
+            expected_ids = [*previous_state["processed_event_ids"], str(prepared.event.id)]
+            if state.get("processed_event_ids") != expected_ids:
+                raise RuntimeError("분류 코어가 예상과 다른 Event 처리 순서를 반환했습니다")
+            self._sync_public_state(topic_id, state)
+            self._validate_checkpoint(topic_id,
+                {"state_version": repo.STATE_VERSION, "core_state": state, "runtime_profiles": context},
+                set(expected_ids), repo.fetch_topic_subtopics(self.conn, topic_id))
+            repo.save_classifier_state(self.conn, topic_id, state, context)
             repo.mark_events_processed(self.conn, [prepared.event.id])
 
     @staticmethod
@@ -592,14 +539,17 @@ class SubtopicBatchService:
         generated: list[tuple[PreparedEvent, ProfileResult]] = []
         context: list[dict[str, Any]] = []
         excluded_count = 0
+        excluded_ids: list[int] = []
+        classified_ids: list[int] = []
 
         for prepared in prepared_events:
             try:
-                profile = self._profile(prepared)
+                profile = self._profile(prepared, allow_processed_repair=True)
                 generated.append((prepared, profile))
                 if prepared.article_span_days > MAX_ARTICLE_SPAN_DAYS:
                     state["excluded_event_ids"].append(str(prepared.event.id))
                     excluded_count += 1
+                    excluded_ids.append(prepared.event.id)
                     continue
                 context.append(profile.runtime_profile)
                 context.sort(key=self._profile_order_key)
@@ -610,6 +560,7 @@ class SubtopicBatchService:
                     current_event_id=prepared.event.id,
                 )
                 state["last_processed_order_key"] = list(prepared.order_key)
+                classified_ids.append(prepared.event.id)
             except EventProcessingError:
                 raise
             except Exception as exc:
@@ -617,21 +568,24 @@ class SubtopicBatchService:
 
         if self.dry_run:
             logger.info("[dry-run] topic_id=%s replay DB writes skipped", topic_id)
-            return len(prepared_events), excluded_count
+            return len(classified_ids), excluded_count
 
         with self.conn.transaction():
             repo.lock_topic(self.conn, topic_id)
             for prepared, profile in generated:
                 repo.lock_event(self.conn, prepared.event.id)
                 self._assert_source_unchanged(prepared)
+                if not profile.reused:
+                    repo.upsert_event_profile(self.conn, profile)
                 repo.invalidate_event_subtopic_summaries(self.conn, prepared.event.id)
-                repo.upsert_event_profile(self.conn, profile)
-                repo.remove_event_memberships(self.conn, prepared.event.id)
             self._sync_public_state(topic_id, state)
-            for event_id in state.get("excluded_event_ids", []):
-                repo.remove_event_memberships(self.conn, int(event_id))
-            repo.mark_events_processed(self.conn, [item.event.id for item in prepared_events])
-        return len(prepared_events), excluded_count
+            self._validate_checkpoint(topic_id,
+                {"state_version": repo.STATE_VERSION, "core_state": state, "runtime_profiles": context},
+                {str(eid) for eid in classified_ids}, repo.fetch_topic_subtopics(self.conn, topic_id))
+            repo.save_classifier_state(self.conn, topic_id, state, context)
+            repo.clear_events_processed(self.conn, excluded_ids)
+            repo.mark_events_processed(self.conn, classified_ids)
+        return len(classified_ids), excluded_count
 
     def _summary_generator_instance(self) -> SubtopicSummaryGenerator:
         if self._summary_generator is None:
