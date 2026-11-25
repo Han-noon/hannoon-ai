@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SubtopicCandidateGeneratorPeriodic7",
+  "type": "object",
+  "required": [
+    "current_event_id",
+    "existing_membership_candidates",
+    "new_subtopic_candidates"
+  ],
+  "properties": {
+    "current_event_id": {
+      "type": "string"
+    },
+    "existing_membership_candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "subtopic_id",
+          "candidate_event_ids",
+          "reason"
+        ],
+        "properties": {
+          "subtopic_id": {
+            "type": "string"
+          },
+          "candidate_event_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "uniqueItems": true
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "new_subtopic_candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "type",
+          "common_basis",
+          "membership_criterion",
+          "candidate_event_ids",
+          "reason"
+        ],
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "FOCAL_POINT",
+              "PROCESS",
+              "RECURRING_ISSUE"
+            ]
+          },
+          "common_basis": {
+            "type": "string",
+            "minLength": 1
+          },
+          "membership_criterion": {
+            "type": "string",
+            "minLength": 1
+          },
+          "candidate_event_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 2,
+            "uniqueItems": true
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

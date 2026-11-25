@@ -15,5 +15,14 @@ dependencies = [
     "python-dotenv>=1.0.0",
 ]
 
+[project.scripts]
+hannoon-subtopics = "subtopic_classifier.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+subtopic_classifier = [
+    "prompts/*.md",
+    "schemas/*.json",
+]
